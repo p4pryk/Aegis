@@ -61,13 +61,18 @@ def case_lines(data,width):
         evidence=decoded(case.get('evidence_json'),{}) or {};analysis=decoded(case.get('analysis_json'),{}) or {};actions=decoded(case.get('result_json'),[]) or []
         login=next((e for e in evidence.get('events',[]) if e.get('kind')=='ssh_session_open'),None)
         account=next((e.get('subject') for e in evidence.get('events',[]) if e.get('kind')=='account_created'),None)
-        view=case_display(case);title=account or case.get('subject','--')
+        view=case_display(case)
+        path=next((e.get('details',{}).get('path') for e in evidence.get('events',[]) if e.get('kind')=='persistence_change'),None)
+        focus=account or path
+        title=view['kind_label']+((': '+str(focus)) if focus else '')
         lines.extend(wrapped(MARKERS[view['level']]+' '+stamp(case.get('updated_at'))+' ['+view['label']+'] '+str(title),width,view['level']))
         lines.extend(wrapped(view['status_label'],width,view['level']))
         if login:
             d=login.get('details',{});lines.extend(wrapped('SSH '+str(d.get('user','--'))+' @ '+str(d.get('ip','--'))+' / session '+str(d.get('session','--')),width))
         lines.extend(wrapped('Evidence: '+str(len(evidence.get('events',[])))+' / links: '+str(len(evidence.get('edges',[]))),width))
-        lines.extend(wrapped(view['summary'],width))
+        # The model may include an application session token in its narrative.
+        summary=re.sub(r'\b[0-9a-f]{32}\b','[session redacted]',view['summary'],flags=re.I)
+        lines.extend(wrapped(summary,width))
         if isinstance(actions,list):
             for action in actions:
                 av=action_display(action)

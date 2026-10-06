@@ -24,7 +24,7 @@ def action_display(result):
     if kind=='terminate_session':target=str(target)+' / session '+str(action.get('session','—'))
     verified=result.get('status')=='executed' and result.get('result',{}).get('verified') is True
     level='defended' if verified else 'critical' if result.get('status') in ('failed','executed') else 'warning'
-    return {**badge(level,'VERIFIED' if verified else 'FAILED / UNVERIFIED' if level=='critical' else 'PENDING'),'message':name+' · '+str(target)}
+    return {**badge(level,'VERIFIED' if verified else 'FAILED / UNVERIFIED' if level=='critical' else 'PENDING'),'message':name+(' · '+str(target) if target else '')}
 
 def case_display(case):
     status=case.get('status');analysis=decode(case.get('analysis_json'),{});evidence=decode(case.get('evidence_json'),{});results=decode(case.get('result_json'),[])

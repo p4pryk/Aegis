@@ -1,3 +1,82 @@
-# AEGIS
+# AEGIS — Linux Defense Agent
 
-The publishable source, installer and tests are in [aegis/](aegis/README.md). Local test evidence, SSH material and VM work files are outside the Git repository.
+AEGIS is a small, always-on Linux VM security prototype. It collects selected kernel audit, SSH and training-application events; joins related events into an evidence-backed case; asks a model to describe the chain; and runs a narrowly scoped response only when local policy can verify the target. The read-only console updates in a terminal while the systemd services continue working in the background.
+
+This repository contains an intentionally vulnerable application for an **isolated training VM**. The application listens on port 8081; keep inbound access to that port closed in the cloud firewall and use an SSH tunnel for exercises.
+
+## Terminal demo
+
+These frames were rendered by the AEGIS console from selected **real incidents recorded during live VM tests**. They show the same layout and colors as the running terminal; the selection keeps each attack chain readable. Application session tokens are redacted in the console.
+
+**Suspicious activity; response withheld because the link to a harmful consequence is missing.**
+
+![AEGIS observes an SQL authentication bypass and application shell without taking an unsupported action](aegis/assets/suspicious.png)
+
+**Correlated SQL injection to cron/systemd persistence; exact files quarantined and session revoked.**
+
+![AEGIS correlates an SQL injection with persistence changes and verifies file quarantine and session revocation](aegis/assets/defended.png)
+
+**Correlated account creation; account and session contained, with an enrolled dedicated-source IP blocked.**
+
+![AEGIS verifies account quarantine, session revocation and a dedicated-source IP block](aegis/assets/account.png)
+
+Yellow marks suspicious observations, red marks an error or confirmed policy violation, and blue marks a verified defense. A failed login or isolated shell launch alone does not trigger an IP block. The header stays fixed while the event and case panels refresh.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Linux audit and SSH] --> C[Normalize and correlate]
+    B[Training app telemetry] --> C
+    C --> D[Evidence case: events and causal links]
+    D --> E[Bounded model assessment]
+    E --> F[Root-owned policy and target recheck]
+    F --> G[Scoped response and verification]
+    D --> H[Read-only terminal console]
+    G --> H
+```
+
+The sensors observe SSH authentication and sessions, root and application process launches, Linux account creation, the training app's SQL authentication outcome, and changes to `authorized_keys`, cron and systemd files. This is an **explicitly configured set of sources**, not a claim to inspect every log on the VM. Events are grouped by identity, application session, process lineage, target path and time. A shared IP or nearby timestamp is context, not proof of causality.
+
+The model receives a bounded case and can select only action IDs supplied by local policy. The privileged executor rechecks current evidence and target identity before acting. If a required link is missing, analysis fails, or the target changes, automatic response is withheld. The model cannot issue arbitrary shell commands.
+
+| Observed chain | Default behavior |
+| --- | --- |
+| Failed SSH attempts, SQLi signature, or one suspicious process | Describe and continue collecting; no automatic block. |
+| Confirmed SQL authentication bypass → app request → independently audited account creation | Quarantine the exact training account and revoke that app session. |
+| Confirmed SQL authentication bypass → app request → independently audited cron/systemd file | Quarantine the exact training file and revoke that app session. |
+| Complete account chain from a separately enrolled dedicated source | Optionally block that IP after the account response. Shared or protected sources are excluded. |
+
+File quarantine preserves the original bytes under `/var/lib/defense-agent/quarantine/`. Automatic file action is limited to training artifacts named `lab_aegis_*` or `lab-aegis-*`; the target application itself can create only bounded, harmless training jobs. Its SQL login is deliberately vulnerable, but it does **not** provide arbitrary SQLite code execution.
+
+## Run on an isolated Ubuntu 24.04 VM
+
+The tested Azure VM has **2 vCPUs and 4 GiB RAM**. It uses systemd, auditd, nftables, Python 3 and a managed identity authorized to call an existing `gpt-6-luna` deployment. Other compatible model deployments can be configured in [`aegis/ai.json.example`](aegis/ai.json.example). No model credential, VM key or incident database belongs in Git.
+
+After cloning the repository onto the VM:
+
+```bash
+sudo install -d -m 0750 /etc/defense-agent
+sudo install -m 0600 aegis/ai.json.example /etc/defense-agent/ai.json
+sudoedit /etc/defense-agent/ai.json  # set your endpoint and deployment
+sudo bash aegis/install.sh
+./aegis/watch.sh
+```
+
+`watch.sh` opens the live console; `watch.sh --snapshot` prints one frame. Press `1` for both panels, `2` for events, `3` for cases, space to pause the display, and `q` to quit. Closing the console does not stop detection. The services are `defense-agent`, `defense-executor`, `defense-agent-ai`, `aegis-target-broker` and `aegis-target`.
+
+The installer creates `/etc/defense-agent/config.json` if it is absent. Before enrolling any IP for automatic blocking, add administrator and VM addresses to `protected_ips`. Dedicated-source lists are empty by default, so IP blocking is off until explicitly configured. Keep the training target reachable only through an SSH tunnel, for example `ssh -L 18091:127.0.0.1:8081 user@vm`.
+
+The training flow is `POST /login` with `{"username":"admin' --","password":"incorrect"}`, followed by `POST /accounts` with the returned `session` and a `lab_http_*` user, or `POST /persistence` with that `session`, `"artifact":"cron"` and a fresh `name`. `POST /shell` exercises application process monitoring with a fixed harmless command. Synthetic valid credentials are shown at the target's `GET /` page. AEGIS itself has no web interface.
+
+## Test and operational limits
+
+```bash
+python3 -m unittest discover -s aegis/tests -q
+```
+
+The current suite has **63 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+
+The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, log rotation, sensor-loss alerting, load testing, and removal or stronger isolation of the privileged training broker.
+
+Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated case data and deployment work files are excluded from Git.
