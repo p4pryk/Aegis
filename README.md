@@ -82,3 +82,13 @@ The current suite has **65 unit tests**. The `aegis/live-app-tests.py`, `aegis/l
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, log rotation, sensor-loss alerting, load testing, and removal or stronger isolation of the privileged training broker.
 
 Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated case data and deployment work files are excluded from Git.
+
+## Change log
+
+### 2026-10-06 — Expanded telemetry and event correlation
+
+- Added bounded journald collection for `sudo`/`su`, selected systemd services, and Nginx/Apache access logs, alongside the existing SSH, audit and AEGIS application sources.
+- Grouped incoming events into short, bounded case snapshots and retained a ten-minute correlation window, so the model can assess related activity across sources instead of isolated log lines.
+- Added server-generated request IDs to join AEGIS HTTP access records to application events exactly; unrelated proxy records remain context and cannot authorize a response.
+- Kept sensitive query strings, headers and command arguments out of stored telemetry, and exposed queue drops and sensor health in the console data.
+- Added correlation regression tests and verified the expanded flows against the isolated Azure training VM.
