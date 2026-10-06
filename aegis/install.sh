@@ -14,17 +14,17 @@ install -d -m 0700 /var/lib/aegis-target
 install -d -m 0750 -o root -g defense-ai /etc/defense-agent
 install -d -m 0750 /var/log/defense-agent
 install -d -m 0700 /root/.ssh
-for name in agent.py ai_worker.py app_correlation.py persistence.py vulnerable_app.py console.py presentation.py; do
+for name in agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
   install -m 0755 "$source_dir/$name" /opt/defense-agent/
 done
 if [ ! -f /etc/defense-agent/config.json ]; then
   cat > /etc/defense-agent/config.json <<'JSON'
-{"mode":"correlated","web_units":["aegis-target.service"],"application_units":["aegis-target.service"],"application_enabled":true,"persistence_enabled":true,"protected_users":["root","labadmin"],"protected_ips":[],"block_seconds":600,"ssh_lab_users_enabled":true,"ssh_response_users":[],"ssh_account_creator_allowlist":["root","labadmin"],"ssh_dedicated_source_ips":[],"app_dedicated_source_ips":[],"analysis_timeout_seconds":90}
+{"mode":"correlated","web_units":["aegis-target.service"],"application_units":["aegis-target.service"],"journal_comms":["sudo","su","su-l"],"journal_identifiers":["sudo","su","systemd"],"journal_units":["aegis-target.service","nginx.service","apache2.service","httpd.service"],"application_enabled":true,"persistence_enabled":true,"protected_users":["root","labadmin"],"protected_ips":[],"block_seconds":600,"ssh_lab_users_enabled":true,"ssh_response_users":[],"ssh_account_creator_allowlist":["root","labadmin"],"ssh_dedicated_source_ips":[],"app_dedicated_source_ips":[],"analysis_timeout_seconds":90}
 JSON
 fi
 python3 - <<'PY'
 import json,pathlib
-p=pathlib.Path('/etc/defense-agent/config.json');config=json.loads(p.read_text());config.update(application_enabled=True,persistence_enabled=True,application_units=['aegis-target.service']);p.write_text(json.dumps(config)+'\n')
+p=pathlib.Path('/etc/defense-agent/config.json');config=json.loads(p.read_text());config.update(application_enabled=True,persistence_enabled=True,application_units=['aegis-target.service']);units=config.setdefault('journal_units',[]);units=units if isinstance(units,list) else [];config['journal_units']=list(dict.fromkeys(['aegis-target.service',*units]));config.setdefault('journal_comms',['sudo','su','su-l']);config.setdefault('journal_identifiers',['sudo','su','systemd']);p.write_text(json.dumps(config)+'\n')
 PY
 chmod 0600 /etc/defense-agent/config.json
 if [ ! -f /etc/defense-agent/ai.json ]; then

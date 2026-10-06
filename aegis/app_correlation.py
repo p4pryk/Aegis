@@ -60,4 +60,4 @@ def plan(events,config,boot_id=None):
     from agent import safe_ip
     if ld['ip'] in config.get('app_dedicated_source_ips',[]) and safe_ip(ld['ip'],config):actions.append(dict(action='block_ip',ip=ld['ip']))
     edges=[{'from':login['event_id'],'to':job['event_id'],'relation':'broker_session_and_login_reference'}, {'from':job['event_id'],'to':producer['event_id'],'relation':'kernel_pid_ppid_boot_and_broker_start_ticks'}, {'from':producer['event_id'],'to':account['event_id'],'relation':'same_boot_producer_pid_auid_session'}]
-    return actions,[e['event_id'] for e in events],edges
+    return actions,[e['event_id'] for e in (login,job,producer,account)],edges

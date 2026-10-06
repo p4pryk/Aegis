@@ -96,10 +96,12 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     lines=logo(width);lines.append('='*width)
     heartbeat=data.get('heartbeat',{});healthy=0<=now-heartbeat.get('time',0)<15
     status='DATA UNAVAILABLE' if error else 'DISPLAY PAUSED' if paused else 'AGENT ONLINE' if healthy else 'CHECK AGENT'
-    lines.append(fit('['+status+']  '+stamp(now)+'  |  audit / SSH / application',width))
+    lines.append(fit('['+status+']  '+stamp(now)+'  |  audit / SSH / application / journald',width))
     metrics=data.get('metrics',[]);total=sum(m.get('total',0) for m in metrics)
     queue=sum(c.get('status') in ('collecting','awaiting_analysis') for c in data.get('cases',[]))
-    lines.append(fit('Events: '+str(total)+'  |  Cases: '+str(len(data.get('cases',[])))+'  |  Pending in view: '+str(queue)+'  |  Audit lost: '+str(data.get('sensor_health',{}).get('audit',{}).get('lost','--')),width))
+    health=data.get('sensor_health',{});journal=health.get('journal');context=health.get('journal_context')
+    drops='--' if not isinstance(journal,dict) or not isinstance(context,dict) else str(journal.get('dropped_events',0)+context.get('dropped_events',0))
+    lines.append(fit('Events: '+str(total)+'  |  Cases: '+str(len(data.get('cases',[])))+'  |  Pending in view: '+str(queue)+'  |  Audit lost: '+str(health.get('audit',{}).get('lost','--'))+'  |  Journal queue drops: '+drops,width))
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
     if mode=='both' and width>=100:

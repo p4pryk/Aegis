@@ -3,8 +3,10 @@
 import argparse, collections, signal, grp, hashlib, ipaddress, json, os, pathlib, pwd, re, socket, sqlite3, stat, struct, subprocess, threading, time
 
 JOURNAL_HEALTH = {'dropped_events':0,'connected':False}
+JOURNAL_CONTEXT_HEALTH = {'dropped_events':0,'connected':False}
 
 DEFAULTS = dict(mode='correlated', protected_ips=[], protected_users=['root','labadmin'], ssh_threshold=5, ssh_window=30, block_seconds=600, data_dir='/var/lib/defense-agent', runtime_dir='/run/defense-agent', audit_socket='/run/defense-agent/audit.sock', executor_socket='/run/defense-agent/executor.sock')
+DEFAULTS.update(journal_comms=['sudo','su','su-l'], journal_identifiers=['sudo','su','systemd'], journal_units=['aegis-target.service','nginx.service','apache2.service','httpd.service'])
 
 def run(args, ok=(0,)):
     p = subprocess.run(args, capture_output=True, text=True, timeout=10)
@@ -264,6 +266,61 @@ class CorrelatedEngine:
             e=dict(event_id=r[0],event_time=r[1],kind=r[2],subject=r[3],details=json.loads(r[4]))
             if e['details'].get('user')==ld['user']:failures.append(e)
         return [*failures[-32:],login,producer,account]
+    def session_context_events(self,login,until):
+        d=login['details'];session=str(d.get('session',''));auid=str(d.get('auid',''))
+        if not session.isdigit() or not auid.isdigit():return []
+        kinds=('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event')
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN (?,?,?,?,?) AND event_time BETWEEN ? AND ? ORDER BY event_time LIMIT 512",(*kinds,login['event_time']-self.c.get('ssh_compromise_window',300),until)).fetchall()
+        result=[]
+        for r in rows:
+            details=json.loads(r[4])
+            if details.get('boot_id')==d.get('boot_id') and str(details.get('audit_session'))==session and str(details.get('auid'))==auid:
+                result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
+        return result
+    def web_context_events(self,lineage,until):
+        if not lineage:return []
+        units=set(self.c.get('web_units',[]));observed=set()
+        for event in lineage:
+            for line in (event['details'].get('cgroup') or '').splitlines():
+                unit=line.rsplit(':',1)[-1].split('/')[-1]
+                if unit in units:observed.add(unit)
+        if not observed:return []
+        start=min(e['event_time'] for e in lineage)-30
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? ORDER BY abs(event_time-?) LIMIT 64",(start,until,until)).fetchall()
+        result=[]
+        for r in rows:
+            details=json.loads(r[4])
+            if details.get('boot_id')==self.boot_id and (details.get('unit') in observed or r[2]=='http_sqli_signature'):
+                result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
+        return result
+    def http_request_context(self,source):
+        d=source['details'];request_id=d.get('request_id')
+        if not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id):return []
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? ORDER BY abs(event_time-?) LIMIT 128",(source['event_time']-2,source['event_time']+2,source['event_time'])).fetchall()
+        path={'app_login':'/login','app_account_job':'/accounts','app_persistence_job':'/persistence'}.get(source['kind'])
+        result=[]
+        for r in rows:
+            details=json.loads(r[4])
+            exact=details.get('request_id')==request_id
+            proxy=(details.get('unit')!='aegis-target.service' and details.get('ip')==d.get('ip') and details.get('path')==path)
+            if details.get('boot_id')==self.boot_id and (exact or proxy):
+                result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
+        return result
+    def enrich_app_cases(self):
+        rows=self.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('app_sql_login','app_sql_account','app_sql_persistence') AND status NOT IN ('defended','recognized','superseded') AND created_at>?",(time.time()-600,)).fetchall()
+        for identifier,kind,subject in rows:
+            for source in self.events(identifier):
+                if source['kind'] not in ('app_login','app_account_job','app_persistence_job'):continue
+                for context in self.http_request_context(source):self.create_or_append(kind,subject,context)
+    def journal_context(self,raw):
+        from journal_sources import parse
+        event=parse(raw,self.boot_id,self.c)
+        if not event:return
+        description=event['description']
+        event=self.normalize(event['kind'],event['subject'],event['details'],event['event_id'],event['event_time'])
+        if not self.remember(event):return
+        self.store.observe('journald',event['kind'],event['subject'],description,event['event_id'],event['event_time'])
+        if event['kind']=='http_sqli_signature':self.create_or_append('waf_threshold',event['subject'],event)
     def enrich_ssh_accounts(self):
         for r in self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='account_created' AND event_time>?",(time.time()-60,)).fetchall():
             self.correlate_ssh_account(dict(event_id=r[0],event_time=r[1],kind=r[2],subject=r[3],details=json.loads(r[4])))
@@ -273,7 +330,8 @@ class CorrelatedEngine:
             login=next(e for e in chain if e['kind']=='ssh_session_open')
             # Separate each created account: a later account must not replace the
             # containment target of an earlier change in the same SSH session.
-            self.create_or_append('ssh_session_account',login['subject']+':'+account['event_id'],account,chain[:-1])
+            context=self.session_context_events(login,account['event_time'])
+            self.create_or_append('ssh_session_account',login['subject']+':'+account['event_id'],account,[*chain[:-1],*context])
     def audit_line(self,line):
         match=re.match(r'^(?:node=\S+ )?type=(\w+)\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s*(.*)',line)
         if not match:return
@@ -325,7 +383,10 @@ class CorrelatedEngine:
         event['details']['account_uid']=account_uid
         if self.remember(event):
             self.store.observe('auditd','account_created',name,'Account created; awaiting correlation and assessment before response.',event_id,timestamp)
-            self.correlate_ssh_account(event) if self.session_chain(event) else self.create_or_append('web_shell_account',name,event,self.lineage(event))
+            if self.session_chain(event):self.correlate_ssh_account(event)
+            else:
+                lineage=self.lineage(event)
+                self.create_or_append('web_shell_account',name,event,[*lineage,*self.web_context_events(lineage,timestamp)])
         self.db.execute('DELETE FROM pending_account_resolution WHERE event_id=?',(event_id,));self.db.commit();return True
     def resolve_pending(self,now):
         for event_id,timestamp,details,deadline in self.db.execute('SELECT * FROM pending_account_resolution LIMIT 256').fetchall():
@@ -370,7 +431,14 @@ class CorrelatedEngine:
             for account in self.events(row[0]):
                 if account['kind']=='account_created':
                     lineage=self.lineage(account)
-                    if lineage:self.create_or_append('web_shell_account',account['subject'],account,lineage)
+                    if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
+    def enrich_web_accounts(self):
+        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized') AND created_at>?",(time.time()-60,)).fetchall()
+        for row in rows:
+            for account in self.events(row[0]):
+                if account['kind']=='account_created':
+                    lineage=self.lineage(account)
+                    if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
     def snapshot(self,identifier,kind,subject,version):
         events=self.events(identifier);allowed=[];required=[];edges=[]
         if kind=='app_sql_persistence':
@@ -394,6 +462,7 @@ class CorrelatedEngine:
                 producer=next(e for e in chain if e['kind']=='process_exec')
                 edges=[{'from':login['event_id'],'to':producer['event_id'],'relation':'same_boot_audit_session_and_loginuid'}, {'from':producer['event_id'],'to':account['event_id'],'relation':'same_boot_producer_pid_auid_session'}]
                 edges.extend({'from':e['event_id'],'to':login['event_id'],'relation':'same_source_and_account_prior_failure_not_causal'} for e in failures)
+                edges.extend({'from':e['event_id'],'to':login['event_id'],'relation':'same_audit_session_context_not_causal'} for e in events if e['kind'] in ('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event'))
                 try:uid=pwd.getpwnam(account['subject']).pw_uid;actor_uid=pwd.getpwnam(actor).pw_uid
                 except KeyError:uid=actor_uid=0
                 scoped=ssh_response_user(actor,self.c) and actor not in self.c['protected_users'] and actor not in self.c.get('ssh_account_creator_allowlist',[]) and actor_uid==int(ld['auid'])
@@ -414,6 +483,16 @@ class CorrelatedEngine:
                         allowed=[dict(action='quarantine_account',user=subject)];required=[e['event_id'] for e in chain]+[account['event_id']]
                         for parent,child in zip(chain,chain[1:]):edges.append({'from':parent['event_id'],'to':child['event_id'],'relation':'kernel_ppid_and_matching_parent_start_ticks'})
                         edges.append({'from':chain[-1]['event_id'],'to':account['event_id'],'relation':'same_boot_producer_pid_auid_session'})
+                if chain:edges.extend({'from':e['event_id'],'to':chain[0]['event_id'],'relation':'nearby_http_time_context_not_causal'} for e in events if e['kind'] in ('http_request','http_sqli_signature'))
+        for request in (e for e in events if e['kind']=='http_request' and e['details'].get('request_id')):
+            match=next((e for e in events if e['kind'] in ('app_login','app_account_job','app_persistence_job') and e['details'].get('request_id')==request['details']['request_id']),None)
+            if match:edges.append({'from':request['event_id'],'to':match['event_id'],'relation':'shared_server_generated_request_id'})
+        if kind in ('app_sql_login','app_sql_account','app_sql_persistence'):
+            for request in (e for e in events if e['kind'] in ('http_request','http_sqli_signature')):
+                if request['details'].get('request_id'):continue
+                app_kind={'/login':'app_login','/accounts':'app_account_job','/persistence':'app_persistence_job'}.get(request['details'].get('path'))
+                match=next((e for e in events if e['kind']==app_kind and e['details'].get('ip')==request['details'].get('ip') and abs(e['event_time']-request['event_time'])<=2),None) if app_kind else None
+                if match:edges.append({'from':request['event_id'],'to':match['event_id'],'relation':'same_ip_and_path_nearby_time_context_not_causal'})
         actor=next((e['details']['user'] for e in events if e['kind']=='ssh_session_open'),None);authorization='not_established'
         account=next((e for e in reversed(events) if e['kind']=='account_created'),None)
         if kind=='persistence_change':
@@ -539,20 +618,41 @@ def journal_reader(queue):
         JOURNAL_HEALTH['connected']=False
         time.sleep(1)
 
+def journal_context_reader(queue,c):
+    from journal_sources import command
+    while True:
+        args=command(c)
+        if not args:
+            JOURNAL_CONTEXT_HEALTH['connected']=False;time.sleep(5);continue
+        try:
+            p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,errors='replace')
+            JOURNAL_CONTEXT_HEALTH['connected']=True
+            for line in p.stdout:
+                try:queue.put(('journal_context',json.loads(line)),timeout=1)
+                except Exception:JOURNAL_CONTEXT_HEALTH['dropped_events']+=1
+        except OSError:
+            JOURNAL_CONTEXT_HEALTH['connected']=False
+        JOURNAL_CONTEXT_HEALTH['connected']=False
+        time.sleep(1)
+
 def serve_core(c):
     import queue
     if c.get('mode','correlated')!='correlated':raise ValueError('Only correlated analyze-before-defense mode is permitted')
     store=Store(c);engine=CorrelatedEngine(c,store,lambda r:request_executor(c,r));s=credential_socket(c['audit_socket'],socket.SOCK_DGRAM);s.settimeout(.05)
-    events=queue.Queue(maxsize=4096);threading.Thread(target=journal_reader,args=(events,),daemon=True).start()
+    events=queue.Queue(maxsize=4096)
+    threading.Thread(target=journal_reader,args=(events,),daemon=True).start()
+    threading.Thread(target=journal_context_reader,args=(events,c),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
     while True:
         try:engine.account(receive(s).decode(errors='replace'))
         except socket.timeout:pass
         except Exception as e:print('audit input rejected:',e,flush=True)
+        context_batch=False
         for _ in range(100):
             try:kind,event=events.get_nowait()
             except queue.Empty:break
             if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
+            if kind=='journal_context':engine.journal_context(event);context_batch=True;continue
             if event.get('_COMM') not in ('sshd','sshd-session') or str(event.get('_UID'))!='0':continue
             message=event.get('MESSAGE','')
             m=re.search(r'^Failed (?:password|publickey) for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+) port \d+',message)
@@ -567,11 +667,14 @@ def serve_core(c):
                 user_match=re.search(r'^(?:Failed (?:password|publickey) for (?:invalid user )?|Invalid user )(\S+)',message)
                 engine.failure('ssh',m[1],timestamp,event_id,user=user_match[1] if user_match else None)
             elif accepted:engine.ssh_success(accepted[2],accepted[1],timestamp,event_id,event.get('_PID'))
+        if context_batch:
+            engine.enrich_ssh_accounts();engine.enrich_web_accounts()
         store.db.commit()
         if c.get('application_enabled',False):
             try:
                 from app_correlation import ingest
                 ingest(engine)
+                engine.enrich_app_cases()
             except Exception as e:store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
         engine.tick()
         if time.time()-last_health>5:
@@ -581,7 +684,7 @@ def serve_core(c):
                 try:
                     status=run(['auditctl','-s']);audit_health={x.split()[0]:' '.join(x.split()[1:]) for x in status.splitlines() if x.split()}
                 except Exception as e:audit_health={'error':str(e)[:200]}
-            health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'audit':audit_health}
+            health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'audit':audit_health}
             store.state('sensor_health',health)
             pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
 

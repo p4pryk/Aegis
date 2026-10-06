@@ -95,4 +95,4 @@ def plan(events,config,boot_id):
     if digest!=jd.get('sha256'):return [],[],[]
     actions=[{'action':'quarantine_persistence','path':path,'sha256':digest},{'action':'revoke_app_session','session':ld['session']}]
     edges=[{'from':login['event_id'],'to':job['event_id'],'relation':'broker_session_and_login_reference'},{'from':mutation['event_id'],'to':job['event_id'],'relation':'kernel_writer_pid_boot_start_ticks_and_exact_path'}]
-    return actions,[e['event_id'] for e in events],edges
+    return actions,[e['event_id'] for e in (login,mutation,job)],edges

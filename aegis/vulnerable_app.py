@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bounded, intentionally vulnerable authentication target with a separate lab broker."""
-import argparse,http.server,ipaddress,json,os,pathlib,pwd,re,secrets,socket,sqlite3,struct,subprocess,time,uuid
+import argparse,http.server,ipaddress,json,os,pathlib,pwd,re,secrets,socket,sqlite3,struct,subprocess,sys,time,uuid
 ROOT=pathlib.Path('/var/lib/aegis-target');SOCKET='/run/aegis-target/broker.sock';LOG='/var/log/defense-agent/application.jsonl'
 def rpc(data):
     with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as s:
@@ -30,7 +30,8 @@ def broker():
                     if uid!=pwd.getpwnam('aegis-target').pw_uid:raise ValueError('Unauthorized collector')
                     groups=pathlib.Path(f'/proc/{peer_pid}/cgroup').read_text()
                     if 'aegis-target.service' not in groups:raise ValueError('Unexpected collector unit')
-                    ip=str(ipaddress.ip_address(d['ip']));request_id=uuid.uuid4().hex
+                    ip=str(ipaddress.ip_address(d['ip']));request_id=d.get('request_id')
+                    if not isinstance(request_id,str) or not re.fullmatch('[a-f0-9]{32}',request_id):request_id=uuid.uuid4().hex
                     db.execute('DELETE FROM sessions WHERE created<?',(time.time()-600,));db.commit()
                     if db.execute('SELECT count(*) FROM sessions').fetchone()[0]>=1000:raise ValueError('Training session limit reached')
                     if op=='login':
@@ -87,14 +88,22 @@ def broker():
 class Handler(http.server.BaseHTTPRequestHandler):
     def setup(self):
         super().setup();self.connection.settimeout(5)
-    def log_message(self,*args):pass
+    def log_message(self,format,*args):
+        try:
+            path=self.path.split('?',1)[0].split('#',1)[0][:256]
+            status=int(args[1]) if len(args)>1 and str(args[1]).isdigit() else 0
+            record={'event':'aegis_http_access','request_id':self._aegis_request_id,'ip':str(ipaddress.ip_address(self.client_address[0])),'method':self.command,'path':path,'status':status}
+            print(json.dumps(record,separators=(',',':')),file=sys.stderr,flush=True)
+        except (AttributeError,IndexError,TypeError,ValueError):pass
     def do_GET(self):
+        self._aegis_request_id=uuid.uuid4().hex
         body=b'AEGIS training target\nPOST /login {username,password}\nPOST /accounts {session,user}\nPOST /persistence {session,artifact,name}\nPOST /shell {session}\nSynthetic credentials: admin / training-admin-only\nIntentionally vulnerable. Isolated training use only.\n';self.send_response(200);self.end_headers();self.wfile.write(body)
     def do_POST(self):
+        self._aegis_request_id=uuid.uuid4().hex
         try:
             size=int(self.headers.get('Content-Length','0'))
             if not 0<size<=2048:raise ValueError('Invalid body size')
-            d=json.loads(self.rfile.read(size));d['op']={'/login':'login','/accounts':'create','/persistence':'persistence','/shell':'check_session'}[self.path];d['ip']=self.client_address[0];result=rpc(d)
+            d=json.loads(self.rfile.read(size));d['op']={'/login':'login','/accounts':'create','/persistence':'persistence','/shell':'check_session'}[self.path];d['ip']=self.client_address[0];d['request_id']=self._aegis_request_id;result=rpc(d)
             if self.path=='/shell' and result.get('status')==200:
                 subprocess.run(['/bin/sh','-c','sleep 0.2; /usr/bin/true'],timeout=3,check=True)
                 result={'status':200,'executed':'fixed training command'}
