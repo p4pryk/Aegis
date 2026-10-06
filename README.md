@@ -77,7 +77,7 @@ The training flow is `POST /login` with `{"username":"admin' --","password":"inc
 python3 -m unittest discover -s aegis/tests -q
 ```
 
-The current suite has **63 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+The current suite has **65 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, log rotation, sensor-loss alerting, load testing, and removal or stronger isolation of the privileged training broker.
 
