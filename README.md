@@ -98,4 +98,4 @@ Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated ca
 - Made local policy, rather than the model's action selection, the source of the complete ordered response plan after a positive assessment at the confidence threshold.
 - Required the full causal evidence set before any response, and kept a case out of `defended` unless every action returns verified success.
 - Added regression tests for a model returning only part of the plan and for missing evidence. All 67 unit tests passed.
-- Re-ran the live SSH account-creation exercise on the Azure lab VM: the account was quarantined, the linked session was terminated, and the source IP remained unblocked without prior failures. The VM was deallocated after testing.
+- Re-ran the live SSH account-creation exercise on the Azure lab VM: the account was quarantined; the short test session had already closed, which the executor verified; and the source IP remained reachable without prior failures. The response completed about 9.4 seconds after the last evidence event in this run. The VM was deallocated after testing.
