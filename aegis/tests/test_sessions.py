@@ -29,6 +29,17 @@ class SSHSessions(unittest.TestCase):
         self.assertEqual([x['action'] for x in data['allowed_actions']],['quarantine_account','terminate_session','block_ip'])
         self.assertTrue(any(e['relation']=='same_boot_audit_session_and_loginuid' for e in data['edges']))
         self.apply(row,self.proposal(row));self.assertEqual(self.status(row),'defended');self.assertEqual(len(self.actions),3)
+    def test_positive_assessment_runs_complete_local_plan_if_model_returns_subset(self):
+        row=self.build();expected=json.loads(row[2])['allowed_actions']
+        self.apply(row,self.proposal(row,actions=expected[:1]))
+        self.assertEqual(self.status(row),'defended');self.assertEqual(self.actions,expected)
+        results=json.loads(self.store.db.execute('SELECT result_json FROM cases WHERE id=?',(row[0],)).fetchone()[0])
+        self.assertEqual([item['action'] for item in results],expected)
+        self.assertTrue(all(item['status']=='executed' and item['result']['verified'] for item in results))
+    def test_positive_assessment_still_requires_all_root_evidence(self):
+        row=self.build();proposal=self.proposal(row,actions=[]);proposal['analysis']['evidence_ids']=[]
+        self.apply(row,proposal)
+        self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
     def test_other_audit_session_not_attributed_to_ip(self):
         row=self.build(session='99');self.assertFalse(json.loads(row[2])['allowed_actions']);self.assertFalse(self.actions)
     def test_other_username_failures_are_not_counted(self):

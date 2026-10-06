@@ -40,7 +40,7 @@ The sensors observe SSH authentication and sessions, root and application proces
 
 This is an **explicitly configured set of sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; the core drains up to 100 events per loop. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows queue drops so sensor backpressure is visible.
 
-The model receives a bounded case and can select only action IDs supplied by local policy. The privileged executor rechecks current evidence and target identity before acting. If a required link is missing, analysis fails, or the target changes, automatic response is withheld. The model cannot issue arbitrary shell commands.
+The model receives a bounded case and can reference only action IDs supplied by local policy. A positive assessment at the configured confidence threshold activates the complete, ordered response plan from local policy; the model cannot omit or add actions. The privileged executor rechecks current evidence and target identity before acting. If a required link is missing, analysis fails, or the target changes, automatic response is withheld. Every action must be verified for the case to be marked defended; a failed step is recorded as `defense_error`. The model cannot issue arbitrary shell commands.
 
 | Observed chain | Default behavior |
 | --- | --- |
@@ -77,7 +77,7 @@ The training flow is `POST /login` with `{"username":"admin' --","password":"inc
 python3 -m unittest discover -s aegis/tests -q
 ```
 
-The current suite has **65 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+The current suite has **67 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, log rotation, sensor-loss alerting, load testing, and removal or stronger isolation of the privileged training broker.
 
@@ -92,3 +92,10 @@ Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated ca
 - Added server-generated request IDs to join AEGIS HTTP access records to application events exactly; unrelated proxy records remain context and cannot authorize a response.
 - Kept sensitive query strings, headers and command arguments out of stored telemetry, and exposed queue drops and sensor health in the console data.
 - Added correlation regression tests and verified the expanded flows against the isolated Azure training VM.
+
+### 2026-10-06 — Complete policy-driven response plans
+
+- Made local policy, rather than the model's action selection, the source of the complete ordered response plan after a positive assessment at the confidence threshold.
+- Required the full causal evidence set before any response, and kept a case out of `defended` unless every action returns verified success.
+- Added regression tests for a model returning only part of the plan and for missing evidence. All 67 unit tests passed.
+- Re-ran the live SSH account-creation exercise on the Azure lab VM: the account was quarantined, the linked session was terminated, and the source IP remained unblocked without prior failures. The VM was deallocated after testing.

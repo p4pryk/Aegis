@@ -520,7 +520,12 @@ class CorrelatedEngine:
         if not isinstance(references,list) or not all(isinstance(x,str) and x in ids for x in references) or not isinstance(actions,list) or len(actions)>8:raise ValueError('invalid evidence references')
         if any(not isinstance(action,dict) or action not in data['allowed_actions'] for action in actions):raise ValueError('proposal outside root policy')
         if len({canonical(action) for action in actions})!=len(actions):raise ValueError('duplicate action')
-        if actions and not set(data['required_evidence_ids']).issubset(references):raise ValueError('missing causal/threshold evidence')
+        minimum_confidence=data.get('policy',{}).get('minimum_confidence',.85)
+        if analysis['attack'] and analysis['confidence']>=minimum_confidence and data['allowed_actions']:
+            if not set(data['required_evidence_ids']).issubset(references):raise ValueError('missing causal/threshold evidence')
+            # The model classifies the case; local policy owns the complete, ordered response plan.
+            analysis['proposed_actions']=data['allowed_actions']
+        else:analysis['proposed_actions']=[]
         return analysis
     def apply_analysis(self,identifier,version,evidence,result):
         current=self.db.execute('SELECT version,status,evidence_json,kind,subject FROM cases WHERE id=?',(identifier,)).fetchone()
@@ -532,7 +537,8 @@ class CorrelatedEngine:
         self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier));self.status(identifier,'recognized',{'version':version})
         data=json.loads(evidence);fresh=self.snapshot(identifier,current[3],current[4],version)
         if not data['allowed_actions']:self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence');return
-        if not analysis['attack'] or analysis['confidence']<.85 or not analysis['proposed_actions']:self.status(identifier,'observing');return
+        minimum_confidence=data.get('policy',{}).get('minimum_confidence',.85)
+        if not analysis['attack'] or analysis['confidence']<minimum_confidence or not analysis['proposed_actions']:self.status(identifier,'observing');return
         if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
         results=[]
         for action in analysis['proposed_actions']:
