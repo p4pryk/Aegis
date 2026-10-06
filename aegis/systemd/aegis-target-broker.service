@@ -1,0 +1,22 @@
+[Unit]
+Description=AEGIS bounded training account broker
+After=defense-agent.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/defense-agent/vulnerable_app.py broker
+Restart=always
+RuntimeDirectory=aegis-target
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_AUDIT_WRITE CAP_SETUID CAP_SETGID
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryMax=128M
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/passwd /etc/shadow /etc/group /etc/gshadow /etc /var/lib/aegis-target /var/log/defense-agent /run/aegis-target
+[Install]
+WantedBy=multi-user.target

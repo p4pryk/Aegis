@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+*.db
+*.db-*
+*.sqlite*
+*.jsonl
+*.pem
+*.key
+.env*
+/ai.json
+/config.json
+/live-results/
+.DS_Store

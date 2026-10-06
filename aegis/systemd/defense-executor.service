@@ -1,0 +1,16 @@
+[Unit]
+Description=AEGIS fixed-action executor
+After=network.target
+[Service]
+ExecStart=/usr/bin/python3 /opt/defense-agent/agent.py executor
+Restart=always
+RestartSec=1
+RuntimeDirectory=defense-agent
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0027
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=true
+[Install]
+WantedBy=multi-user.target

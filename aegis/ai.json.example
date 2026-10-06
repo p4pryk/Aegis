@@ -1,0 +1,1 @@
+{"endpoint":"https://YOUR-FOUNDRY-ACCOUNT.cognitiveservices.azure.com/","deployment":"gpt-6-luna","reasoning_effort":"none","max_calls_per_hour":40,"min_call_interval_seconds":8}

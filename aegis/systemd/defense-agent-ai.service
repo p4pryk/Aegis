@@ -1,0 +1,20 @@
+[Unit]
+Description=AEGIS read-only AI analyst
+After=network-online.target defense-agent.service
+Wants=network-online.target
+[Service]
+User=defense-ai
+Group=defense-ai
+ExecStart=/usr/bin/python3 /opt/defense-agent/ai_worker.py
+Restart=always
+RestartSec=3
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/defense-agent-ai
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+[Install]
+WantedBy=multi-user.target

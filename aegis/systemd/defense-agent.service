@@ -1,0 +1,15 @@
+[Unit]
+Description=AEGIS correlation engine
+After=defense-executor.service auditd.service
+Requires=defense-executor.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/defense-agent/agent.py core
+Restart=always
+RestartSec=1
+UMask=0027
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/defense-agent /run/defense-agent
+[Install]
+WantedBy=multi-user.target
