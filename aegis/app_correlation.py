@@ -1,28 +1,30 @@
 """Root-owned application telemetry joined with independent kernel audit records."""
-import json,os,pathlib,re,stat,time,pwd
+import fcntl,json,os,pathlib,re,stat,time,pwd
 from vulnerable_app import rpc
 LOG='/var/log/defense-agent/application.jsonl'
 def ingest(engine):
-    try:fd=os.open(LOG,os.O_RDONLY|os.O_NOFOLLOW)
+    try:fd=os.open(engine.c.get('application_log',LOG),os.O_RDONLY|os.O_NOFOLLOW)
     except FileNotFoundError:return
     with os.fdopen(fd) as f:
-        st=os.fstat(f.fileno())
-        if st.st_uid!=0 or st.st_mode&0o022 or not stat.S_ISREG(st.st_mode):raise ValueError('Untrusted application telemetry')
-        off=engine.store.state('app_offset') or {};position=off.get('offset',0) if off.get('ino')==st.st_ino and off.get('offset',0)<=st.st_size else 0;f.seek(position)
-        for _ in range(100):
-            line=f.readline()
-            if not line or not line.endswith('\n'):break
-            position=f.tell()
-            try:
-                d=json.loads(line)
-                if d['type'] not in ('app_login','app_account_job','app_persistence_job') or d['boot_id']!=engine.boot_id or abs(time.time()-d['time'])>60:continue
-                event=engine.normalize(d['type'],d.get('session') or d['request_id'],d,'app:'+d['event_id'],d['time'])
-                if engine.remember(event):
-                    engine.store.observe('application', 'sql_auth_bypass' if d['type']=='app_login' and d['bypass'] else 'sqli_signature' if d['type']=='app_login' and d.get('suspicious') else d['type'],d['ip'],'Database authentication outcome recorded.' if d['type']=='app_login' else 'Application operation completed; awaiting independent audit correlation.',event['event_id'],d['time'])
-                    if d['type']=='app_login' and (d['bypass'] or d.get('suspicious')):engine.create_or_append('app_sql_login',event['subject'],event)
-            except (ValueError,KeyError,TypeError):continue
-        new_offset={'ino':st.st_ino,'offset':position}
-        if off!=new_offset:engine.store.state('app_offset',new_offset)
+        fcntl.flock(f,fcntl.LOCK_SH)
+        with engine.store.atomic():
+            st=os.fstat(f.fileno())
+            if st.st_uid!=0 or st.st_mode&0o022 or not stat.S_ISREG(st.st_mode):raise ValueError('Untrusted application telemetry')
+            off=engine.store.state('app_offset') or {};position=off.get('offset',0) if off.get('ino')==st.st_ino and off.get('offset',0)<=st.st_size else 0;f.seek(position)
+            for _ in range(100):
+                line=f.readline()
+                if not line or not line.endswith('\n'):break
+                position=f.tell()
+                try:
+                    d=json.loads(line)
+                    if d['type'] not in ('app_login','app_account_job','app_persistence_job') or d['boot_id']!=engine.boot_id or abs(time.time()-d['time'])>60:continue
+                    event=engine.normalize(d['type'],d.get('session') or d['request_id'],d,'app:'+d['event_id'],d['time'])
+                    if engine.remember(event):
+                        engine.store.observe('application', 'sql_auth_bypass' if d['type']=='app_login' and d['bypass'] else 'sqli_signature' if d['type']=='app_login' and d.get('suspicious') else d['type'],d['ip'],'Database authentication outcome recorded.' if d['type']=='app_login' else 'Application operation completed; awaiting independent audit correlation.',event['event_id'],d['time'])
+                        if d['type']=='app_login' and (d['bypass'] or d.get('suspicious')):engine.create_or_append('app_sql_login',event['subject'],event)
+                except (ValueError,KeyError,TypeError):continue
+            new_offset={'ino':st.st_ino,'offset':position}
+            if off!=new_offset:engine.store.state('app_offset',new_offset)
     if time.monotonic()-getattr(engine,'last_app_enrichment',0)<.25:return
     engine.last_app_enrichment=time.monotonic()
     rows=engine.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('app_account_job','app_persistence_job') AND event_time>?",(time.time()-60,)).fetchall()

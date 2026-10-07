@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Local policy engine. No model output is executable input."""
+from contextlib import contextmanager
 import argparse, collections, signal, grp, hashlib, ipaddress, json, os, pathlib, pwd, re, socket, sqlite3, stat, struct, subprocess, threading, time
 
 JOURNAL_HEALTH = {'dropped_events':0,'connected':False}
@@ -130,16 +131,37 @@ class Executor:
             return dict(verified=True,user=name,uid=account.pw_uid,locked=True,expired=True,no_processes=True)
         raise ValueError('unknown action')
 
+class AtomicConnection(sqlite3.Connection):
+    deferred = False
+    def commit(self):
+        if not self.deferred:super().commit()
+
 class Store:
     def __init__(self,c):
         self.path=pathlib.Path(c['data_dir'])/'incidents.db'
-        self.db=sqlite3.connect(self.path)
+        self.db=sqlite3.connect(self.path, timeout=10, factory=AtomicConnection)
         self.db.execute('PRAGMA journal_mode=DELETE')
+        self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        self.db.execute('PRAGMA max_page_count='+str(int(c.get('database_max_bytes',256*1024*1024))//4096))
         self.db.executescript('CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT);')
         self.db.executescript('CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY, time REAL, source TEXT, kind TEXT, subject TEXT, description TEXT); CREATE TABLE IF NOT EXISTS sensor_metrics(source TEXT PRIMARY KEY, total INTEGER, last_event REAL);')
         self.db.commit(); os.chmod(self.path,0o640)
         try: os.chown(self.path,0,grp.getgrnam('defense-ai').gr_gid)
         except KeyError: pass
+    @contextmanager
+    def atomic(self):
+        if self.db.deferred:raise RuntimeError('Nested transaction')
+        self.db.commit()
+        self.db.execute('BEGIN IMMEDIATE')
+        self.db.deferred=True
+        try:
+            yield
+        except BaseException:
+            self.db.rollback()
+            raise
+        finally:
+            self.db.deferred=False
+        self.db.commit()
     def state(self,key,value=None):
         if value is None:
             row=self.db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone(); return json.loads(row[0]) if row else None
@@ -182,6 +204,8 @@ class CorrelatedEngine:
         import response
         response.initialize(self.db)
         self.last_cleanup=0;self.last_session_reconcile=0
+        self.persistence_pending=store.state('audit_assembly') or {}
+        self.audit_snapshots=None
     def status(self,identifier,status,details=None):
         now=time.time();self.db.execute('UPDATE cases SET status=?,updated_at=? WHERE id=?',(status,now,identifier));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,status,now,canonical(details or {})));self.db.commit()
     def events(self,identifier):
@@ -236,7 +260,7 @@ class CorrelatedEngine:
         identity=f'{self.boot_id}:{session}:{uid}'
         if kind in ('USER_END','1106'):
             self.db.execute('UPDATE ssh_sessions SET active=0 WHERE identity=?',(identity,));self.db.commit();return
-        snap=process_snapshot(pid)
+        snap=self.audit_snapshot(pid)
         details={'boot_id':self.boot_id,'session':str(session),'auid':str(uid),'user':user,'ip':ip,'sshd_pid':pid,'sshd_start_ticks':snap.get('start_ticks') if snap else None,'identity':identity}
         event=self.normalize('ssh_session_open',identity,details,event_id+':session',timestamp)
         if not self.remember(event):return
@@ -357,6 +381,8 @@ class CorrelatedEngine:
             # containment target of an earlier change in the same SSH session.
             context=self.session_context_events(login,account['event_time'])
             self.create_or_append('ssh_session_account',login['subject']+':'+account['event_id'],account,[*chain[:-1],*context])
+    def audit_snapshot(self,pid):
+        return self.audit_snapshots.get(str(pid)) if self.audit_snapshots is not None else process_snapshot(pid)
     def audit_line(self,line):
         match=re.match(r'^(?:node=\S+ )?type=(\w+)\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s*(.*)',line)
         if not match:return
@@ -374,7 +400,7 @@ class CorrelatedEngine:
             if fields.get('success')!='yes' or fields.get('key') not in self.c.get('audit_exec_keys',['lab_root_exec','aegis_app_exec']):return
             try:pid=int(fields['pid']);ppid=int(fields['ppid'])
             except (KeyError,ValueError):return
-            snap=process_snapshot(pid);parent=process_snapshot(ppid)
+            snap=self.audit_snapshot(pid);parent=self.audit_snapshot(ppid)
             # Only kernel audit metadata and process identity enter model evidence.
             details={'pid':pid,'ppid':ppid,'exe':fields.get('exe','')[:200],'boot_id':self.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'start_ticks':snap.get('start_ticks') if snap else None,'parent_start_ticks':parent.get('start_ticks') if parent else None,'cgroup':snap.get('cgroup') if snap else parent.get('cgroup') if parent else None}
             event=self.normalize('process_exec',str(pid),details,event_id+':exec',timestamp)
@@ -557,6 +583,8 @@ class CorrelatedEngine:
         if not current or current[0]!=version or current[1]!='awaiting_analysis' or current[2]!=evidence:return
         try:analysis=self.validate_result((identifier,version,evidence),result)
         except (ValueError,TypeError,KeyError) as e:self.status(identifier,'analysis_error',{'error':str(e)});return
+        from monitoring import case_timing
+        case_timing(self,identifier,result)
         analysis['origin']=str(result.get('model','unknown'))[:100]
         import response
         data=json.loads(evidence);fresh=self.snapshot(identifier,current[3],current[4],version)
@@ -573,11 +601,11 @@ class CorrelatedEngine:
             self.db.rollback()
             raise
         self.status(identifier,'recognized',{'version':version})
-        response.advance(self,identifier)
+        if self.execute is not None:response.advance(self,identifier)
     def tick(self,now=None):
         now=time.time() if now is None else now
         import response
-        response.resume(self,now)
+        if self.execute is not None:response.resume(self,now)
         self.reconcile_sessions(now)
         self.resolve_pending(now)
         for identifier,created,updated,kind,subject,version in self.db.execute("SELECT id,created_at,updated_at,kind,subject,version FROM cases WHERE status='collecting'").fetchall():
@@ -630,43 +658,42 @@ def request_executor(c,request):
     if not reply['ok']:raise RuntimeError(reply['error'])
     return reply['result']
 
-def audit_plugin():
+def audit_plugin(c):
     import sys
-    s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
-    for line in sys.stdin:
-        if re.search(r'^(?:node=\S+ )?type=(?:ADD_USER|1114|SYSCALL|1300|PATH|1302|EOE|1320|USER_LOGIN|1112|USER_START|1105|USER_END|1106)\s',line):
-            if re.search(r'type=(?:SYSCALL|1300)\s',line) and not re.search(r'\bkey="?(?:lab_root_exec|aegis_app_exec|aegis_persistence)"?(?:\s|$)',line):continue
-            try:s.sendto(line.encode()[:60000],DEFAULTS['audit_socket'])
-            except OSError as e:print(f'defense-agent audit delivery failed: {e}',file=sys.stderr,flush=True)
+    from audit_spool import forward
+    forward(c,sys.stdin)
 
 def serve_core(c):
     import queue
     from journal_stream import Checkpoints,reader
+    from audit_spool import Spool,consume
+    from monitoring import Meter
     if c.get('mode','correlated')!='correlated':raise ValueError('Only correlated analyze-before-defense mode is permitted')
-    store=Store(c);engine=CorrelatedEngine(c,store,lambda r:request_executor(c,r));s=credential_socket(c['audit_socket'],socket.SOCK_DGRAM);s.settimeout(.05)
+    store=Store(c);engine=CorrelatedEngine(c,store,None);spool=Spool(c);meter=Meter()
     events=queue.Queue(maxsize=4096)
     checkpoints=Checkpoints(store)
     threading.Thread(target=reader,args=(events,'ssh',c,checkpoints,JOURNAL_HEALTH),daemon=True).start()
     threading.Thread(target=reader,args=(events,'journal_context',c,checkpoints,JOURNAL_CONTEXT_HEALTH),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
     while True:
-        try:engine.account(receive(s).decode(errors='replace'))
-        except socket.timeout:pass
-        except Exception as e:print('audit input rejected:',e,flush=True)
-        context_batch=False;processed={}
-        for _ in range(100):
-            try:kind,event=events.get_nowait()
-            except queue.Empty:break
-            if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
-            try:
-                if kind=='journal_context':engine.journal_context(event);context_batch=True
-                elif kind=='ssh':engine.journal_ssh(event)
-            except (ValueError,TypeError,KeyError) as exc:
-                store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
-            processed[kind]=event
-        if context_batch:
-            engine.enrich_ssh_accounts();engine.enrich_web_accounts()
-        checkpoints.commit(store,processed)
+        loop_start=time.monotonic()
+        consumed=consume(engine,spool)
+        with store.atomic():
+            context_batch=False;processed={}
+            for _ in range(100):
+                try:kind,event=events.get_nowait()
+                except queue.Empty:break
+                if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
+                try:
+                    if kind=='journal_context':engine.journal_context(event);context_batch=True
+                    elif kind=='ssh':engine.journal_ssh(event)
+                except (ValueError,TypeError,KeyError) as exc:
+                    store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
+                processed[kind]=event
+                consumed+=1
+            if context_batch:
+                engine.enrich_ssh_accounts();engine.enrich_web_accounts()
+            checkpoints.commit(store,processed)
         if c.get('application_enabled',False):
             try:
                 from app_correlation import ingest
@@ -674,6 +701,7 @@ def serve_core(c):
                 engine.enrich_app_cases()
             except Exception as e:store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
         engine.tick()
+        meter.add(consumed,time.monotonic()-loop_start)
         if time.time()-last_health>5:
             last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid()})
             if last_health-last_audit_health>30:
@@ -681,13 +709,22 @@ def serve_core(c):
                 try:
                     status=run(['auditctl','-s']);audit_health={x.split()[0]:' '.join(x.split()[1:]) for x in status.splitlines() if x.split()}
                 except Exception as e:audit_health={'error':str(e)[:200]}
-            health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'audit':audit_health}
+            with events.mutex:
+                first=events.queue[0][1] if events.queue else {}
+                try:journal_age=max(0,last_health-int(first['__REALTIME_TIMESTAMP'])/1e6)
+                except (KeyError,ValueError,TypeError):journal_age=0
+            response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
+            health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
             store.state('sensor_health',health)
             pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
+        if consumed==0:time.sleep(.02)
+
+def load_config(path='/etc/defense-agent/config.json'):
+    c=DEFAULTS.copy();c.update(json.loads(pathlib.Path(path).read_text()))
+    return c
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['core','executor','audit-plugin']);parser.add_argument('--config',default='/etc/defense-agent/config.json');a=parser.parse_args()
-    if a.mode=='audit-plugin':audit_plugin()
-    else:
-        c=DEFAULTS.copy();c.update(json.loads(pathlib.Path(a.config).read_text()));pathlib.Path(c['runtime_dir']).mkdir(mode=0o700,parents=True,exist_ok=True)
-        (serve_core if a.mode=='core' else serve_executor)(c)
+    c=load_config(a.config)
+    pathlib.Path(c['runtime_dir']).mkdir(mode=0o700,parents=True,exist_ok=True)
+    {'core':serve_core,'executor':serve_executor,'audit-plugin':audit_plugin}[a.mode](c)

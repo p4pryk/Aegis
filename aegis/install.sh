@@ -7,6 +7,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd audispd-plugins nft
 getent group defense-ai >/dev/null || groupadd --system defense-ai
 id defense-ai >/dev/null 2>&1 || useradd --system --gid defense-ai --home-dir /var/lib/defense-agent-ai --shell /usr/sbin/nologin defense-ai
 getent passwd aegis-target >/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin aegis-target
+systemctl stop defense-response.service defense-agent-ai.service defense-agent.service 2>/dev/null || true
+install -d -m 0700 /var/lib/defense-agent-audit
 install -d -m 0755 /opt/defense-agent
 install -d -m 0750 -o root -g defense-ai /var/lib/defense-agent
 install -d -m 0750 -o defense-ai -g defense-ai /var/lib/defense-agent-ai
@@ -14,7 +16,7 @@ install -d -m 0700 /var/lib/aegis-target
 install -d -m 0750 -o root -g defense-ai /etc/defense-agent
 install -d -m 0750 /var/log/defense-agent
 install -d -m 0700 /root/.ssh
-for name in response.py journal_stream.py agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
+for name in audit_spool.py monitoring.py maintenance.py response.py journal_stream.py agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
   install -m 0755 "$source_dir/$name" /opt/defense-agent/
 done
 if [ ! -f /etc/defense-agent/config.json ]; then
@@ -68,7 +70,16 @@ printf '%s\n' 'LogLevel VERBOSE' > /etc/ssh/sshd_config.d/60-aegis-observability
 systemctl reload ssh
 augenrules --load
 systemctl disable --now defense-agent-dashboard.service defense-lab-gateway.service 2>/dev/null || true
+# One-time conversion enables bounded incremental space reclamation.
+python3 - <<'PYDB'
+import sqlite3,pathlib
+path=pathlib.Path('/var/lib/defense-agent/incidents.db')
+if path.exists():
+    with sqlite3.connect(path) as db:
+        if db.execute('PRAGMA auto_vacuum').fetchone()[0]!=2:
+            db.execute('PRAGMA auto_vacuum=INCREMENTAL');db.execute('VACUUM')
+PYDB
 systemctl daemon-reload
-systemctl enable --now defense-executor.service defense-agent.service defense-agent-ai.service aegis-target-broker.service aegis-target.service
-systemctl restart defense-executor.service defense-agent.service defense-agent-ai.service aegis-target-broker.service aegis-target.service
+systemctl enable --now defense-response.service defense-executor.service defense-agent.service defense-agent-ai.service aegis-target-broker.service aegis-target.service
+systemctl restart defense-response.service defense-executor.service defense-agent.service defense-agent-ai.service aegis-target-broker.service aegis-target.service
 service auditd restart

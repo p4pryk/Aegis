@@ -14,7 +14,10 @@ def broker():
     boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip();broker_ticks=ticks(os.getpid())
     def emit(kind,**data):
         event=dict(type=kind,time=time.time(),event_id=uuid.uuid4().hex,boot_id=boot,broker_pid=os.getpid(),broker_start_ticks=broker_ticks,**data)
-        with open(LOG,'a') as f:f.write(json.dumps(event)+'\n')
+        with open(LOG,'a') as f:
+            import fcntl
+            fcntl.flock(f,fcntl.LOCK_EX)
+            f.write(json.dumps(event)+'\n');f.flush()
         os.chmod(LOG,0o600);return event['event_id']
     while True:
         client,_=server.accept()

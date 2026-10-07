@@ -10,6 +10,6 @@ UMask=0027
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/defense-agent /run/defense-agent
+ReadWritePaths=/var/lib/defense-agent /run/defense-agent /var/lib/defense-agent-audit
 [Install]
 WantedBy=multi-user.target

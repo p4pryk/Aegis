@@ -106,6 +106,14 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     gaps=sum(bool(source.get('cursor_gap_at')) for source in sources)
     pressure=sum(source.get('backpressure_count',0) for source in sources)
     lines.append(fit('Journal backpressure waits: '+str(pressure)+'  |  Cursor replay: '+('GAP REPORTED — CHECK JOURNAL RETENTION' if gaps else 'CHECKPOINTED' if len(sources)==2 else 'UNAVAILABLE'),width))
+    spool=health.get('audit_spool',{});storage=data.get('storage_health',{});worker=data.get('response_worker',{})
+    worker_status='ONLINE' if 0<=now-worker.get('time',0)<40 else 'CHECK WORKER'
+    warning=' [! STORAGE PRESSURE]' if storage.get('pressure') else ''
+    warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') else ''
+    lines.append(fit(f"Audit + journal: {health.get('records_per_second',0)} records/s | Audit pending: {spool.get('rows','--')} | Oldest: {spool.get('oldest_seconds',0):.1f}s | Lost: {spool.get('dropped','--')}"+warning,width))
+    lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
+    timing=data.get('latest_timing') or {}
+    lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
     if mode=='both' and width>=100:
@@ -139,7 +147,9 @@ def read_snapshot(database):
         cases=[dict(r) for r in conn.execute('SELECT * FROM cases ORDER BY updated_at DESC LIMIT 40')]
         events=[dict(r) for r in conn.execute('SELECT * FROM observations ORDER BY rowid DESC LIMIT 60')]
         metrics=[dict(r) for r in conn.execute('SELECT * FROM sensor_metrics')]
-        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health')")}
+        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker')")}
+        timing=conn.execute('SELECT t.* FROM case_timings t JOIN cases c ON c.id=t.case_id ORDER BY c.updated_at DESC LIMIT 1').fetchone()
+        states['latest_timing']=dict(timing) if timing else {}
         return {'cases':cases,'observations':events,'metrics':metrics,**states}
     finally:conn.close()
 

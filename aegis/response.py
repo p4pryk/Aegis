@@ -14,6 +14,7 @@ def policy_hash(config):
 
 def initialize(db):
     db.executescript('''
+        CREATE TABLE IF NOT EXISTS case_timings(case_id TEXT PRIMARY KEY, collection_ms REAL, model_queue_ms REAL, model_ms REAL, result_wait_ms REAL, response_ms REAL);
         CREATE TABLE IF NOT EXISTS case_versions (
             case_id TEXT, version INTEGER, archived_at REAL, status TEXT,
             evidence_json TEXT, analysis_json TEXT, result_json TEXT,
@@ -138,11 +139,40 @@ def advance(engine, identifier, now=None):
     publish(engine, identifier)
     states = [r[0] for r in engine.db.execute('SELECT status FROM response_steps WHERE case_id=?', (identifier,))]
     if states and all(s in ('executed', 'failed') for s in states):
+        engine.db.execute('UPDATE case_timings SET response_ms=? WHERE case_id=?', ((time.time()-(run[2]-120))*1000,identifier))
         engine.status(identifier, 'defended' if all(s == 'executed' for s in states) else 'defense_error')
         archive(engine.db, identifier)
         engine.db.commit()
 
 
 def resume(engine, now):
-    for identifier, in engine.db.execute("SELECT id FROM cases WHERE status='recognized'").fetchall():
+    for identifier, in engine.db.execute("SELECT id FROM cases WHERE status='recognized' ORDER BY created_at LIMIT 256").fetchall():
         advance(engine, identifier, now)
+
+
+def main():
+    import argparse
+    import fcntl
+    import pathlib
+    from agent import Store, CorrelatedEngine, load_config, request_executor
+    from maintenance import maintain
+    parser=argparse.ArgumentParser();parser.add_argument('--config',default='/etc/defense-agent/config.json');args=parser.parse_args()
+    config=load_config(args.config)
+    # One durable queue owner across restarts; never hold a SQLite lock during side effects.
+    with (pathlib.Path(config['data_dir'])/'response.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        store=Store(config)
+        engine=CorrelatedEngine(config,store,lambda request:request_executor(engine.c,request))
+        last_maintenance=0
+        while True:
+            engine.c=load_config(args.config)
+            store.state('response_worker',{'time':time.time(),'status':'processing'})
+            resume(engine,time.time())
+            if time.time()-last_maintenance>=60:
+                maintain(engine)
+                last_maintenance=time.time()
+            store.state('response_worker',{'time':time.time(),'status':'idle'})
+            time.sleep(.5)
+
+
+if __name__=='__main__':main()

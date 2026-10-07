@@ -26,35 +26,40 @@ Yellow marks suspicious observations, red marks an error or confirmed policy vio
 
 ```mermaid
 flowchart LR
-    A[Linux audit and SSH] --> C[Normalize and correlate]
+    A[Linux audit] --> I[Durable bounded inbox]
+    I --> C[Normalize and correlate]
+    J[SSH and selected journald sources] --> C
     B[Training app telemetry] --> C
     C --> D[Evidence case: events and causal links]
     D --> E[Bounded model assessment]
     E --> F[Root-owned policy and target recheck]
-    F --> G[Scoped response and verification]
+    F --> Q[Durable response queue]
+    Q --> R[Separate response worker]
+    R --> G[Scoped response and verification]
     D --> H[Read-only terminal console]
     G --> H
 ```
 
 The sensors observe SSH authentication and sessions, root and application process launches, Linux account creation, the training app's SQL authentication outcome, and changes to `authorized_keys`, cron and systemd files. A bounded journald reader also captures `sudo`/`su`, system service transitions, and access logs from configured web-service units (the AEGIS target and Nginx/Apache by default). Web access parsing stores method, path and status; query strings, headers and raw log messages are discarded. The training app emits a structured access record with a server-generated request ID that is also carried through broker and application telemetry, so those records join exactly. Other web-server logs are contextual unless they propagate the same request ID. Configure `journal_comms`, `journal_identifiers` and `journal_units` in `/etc/defense-agent/config.json` to select sources available on your host. A web server must send access logs to journald for this reader to see them.
 
-This is an **explicitly configured set of sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; the core drains up to 100 events per loop. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows journal backpressure waits and reported cursor gaps.
+This is an **explicitly configured set of sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; each core loop drains up to 100 journal records, 100 durable audit records and 100 application records. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows journal backpressure waits and reported cursor gaps.
 
-Collection is continuous, not a 30-second polling job. Each journal source has a durable cursor, advanced only after its records have been processed and committed. Replayed records inside the ten-minute correlation window are deduplicated; older entries are skipped and cannot trigger a stale response. A full queue pauses the reader instead of discarding records. If journal retention removes a cursor, the reader reports a possible gap and falls back to the last ten minutes. Original journal boot IDs are preserved, so events from a previous boot cannot become current-session context. This replay guarantee applies to retained journald entries; the separate audit socket still has no disk-backed replay.
+Collection is continuous, not a 30-second polling job. Each journal source has a durable cursor, advanced only after its records have been processed and committed. Replayed records inside the ten-minute correlation window are deduplicated; older entries are skipped and cannot trigger a stale response. A full queue pauses the reader instead of discarding records. If journal retention removes a cursor, the reader reports a possible gap and falls back to the last ten minutes. Original journal boot IDs are preserved, so events from a previous boot cannot become current-session context. Auditd now writes selected records to a separate, root-private SQLite inbox before the core processes them. Inbox acknowledgment follows the same core transaction as normalized evidence and its cursor. A restart before acknowledgment replays uncommitted input; a restart after commit skips already processed records. Pending multi-record file events are saved with that cursor. PID metadata is captured on receipt and never replaced with a possibly reused live PID during replay. This covers committed inbox records, not events lost upstream by the kernel/audit dispatcher or before the producer commits. Previous-boot records are counted and skipped; records outside the ten-minute correlation window cannot trigger a stale response.
 
 | Bound | Current value |
 | --- | --- |
 | In-memory journal queue | 4,096 records |
-| Journal/application processing batch | Up to 100 journal records plus 100 application records per core loop |
+| Processing batch per core loop | Up to 100 audit + 100 journal + 100 application records |
+| Audit inbox | 16 MiB payload / 50,000 records; SQLite allocation capped at 64 MiB |
 | Correlation retention | Ten minutes, at most 20,000 events after periodic cleanup |
 | Evidence per case / active cases | Up to 256 events / 256 cases |
 | Recent console observations | Last 2,000 observations |
 
-These are capacity limits, not measured events per second. Incident history and model result files currently need an external retention policy.
+These are capacity limits, not measured events per second. When the audit inbox reaches its admission limit, it retains accepted records, counts rejected new records and raises a terminal warning; it does not silently claim lossless operation under unlimited overload. Disk/IO failures are also reported in the producer journal (and persisted when storage remains writable).
 
 The model receives a bounded case and can reference only action IDs supplied by local policy. A positive assessment at the configured confidence threshold activates the complete, ordered response plan from local policy; the model cannot omit or add actions. The privileged executor rechecks current evidence and target identity before acting. If a required link is missing, analysis fails, or the target changes, automatic response is withheld. Every action must be verified for the case to be marked defended; a failed step is recorded as `defense_error`. The model cannot issue arbitrary shell commands.
 
-The approved plan and each action attempt are stored durably before execution. A core restart resumes unfinished steps and preserves verified results, with at most three attempts per step within a 120-second recovery window. Recovery requires the same boot and loaded configuration. Account requests pin the audited UID; file recovery verifies the preserved quarantine bytes; IP retries retain the original expiry and wait for preceding containment to succeed. An unknown outcome at the retry limit, a changed boot/policy, or a legacy interrupted case without a saved plan requires manual review. The `response_attempts` table retains attempts, and `case_versions` preserves completed responses and assessments superseded by new evidence.
+The approved plan and each action attempt are stored durably before execution. The separate `defense-response` process owns the durable queue; core collection never waits for the executor. A singleton lock prevents competing response workers, and no SQLite transaction is held during external side effects. A response-worker restart resumes unfinished steps and preserves verified results, with at most three attempts per step within a 120-second recovery window. Recovery requires the same boot and loaded configuration. Account requests pin the audited UID; file recovery verifies the preserved quarantine bytes; IP retries retain the original expiry and wait for preceding containment to succeed. An unknown outcome at the retry limit, a changed boot/policy, or a legacy interrupted case without a saved plan requires manual review. The `response_attempts` table retains attempts, and `case_versions` preserves completed responses and assessments superseded by new evidence.
 
 | Observed chain | Default behavior |
 | --- | --- |
@@ -64,6 +69,31 @@ The approved plan and each action attempt are stored durably before execution. A
 | Complete account chain from a separately enrolled dedicated source | Optionally block that IP after the account response. Shared or protected sources are excluded. |
 
 File quarantine preserves the original bytes under `/var/lib/defense-agent/quarantine/`. Automatic file action is limited to training artifacts named `lab_aegis_*` or `lab-aegis-*`; the target application itself can create only bounded, harmless training jobs. Its SQL login is deliberately vulnerable, but it does **not** provide arbitrary SQLite code execution.
+
+## Operations and retention
+
+The terminal shows consumed audit/journal records per second, audit and journal backlog and age, audit loss, core-loop p95, response-worker health, queued responses and database usage. Rates count input records, not attacks; application records remain in the existing source totals. The latest case shows collection, model queue, model request, result pickup and response duration in milliseconds. Missing timing values remain unknown rather than zero. Operational state is stored under `sensor_health`, `response_worker` and `storage_health`; per-case durations are in `case_timings`.
+
+The response worker also runs bounded maintenance approximately once per minute:
+
+| Setting in `config.json` | Default / behavior |
+| --- | --- |
+| `retention_days` | Seven days for completed cases, their evidence, versions and attempts |
+| `database_retention_bytes` | 128 MiB used-page target; under pressure, remove oldest completed cases older than ten minutes |
+| `database_max_bytes` | 256 MiB SQLite allocation cap per writer connection; exhaustion is an error, never permission to discard active cases |
+| `audit_spool_bytes` / `audit_spool_records` | 16 MiB payload / 50,000 pending records |
+| `model_output_max_bytes` | 32 MiB pressure warning; stale and completed result files are removed after ten minutes |
+| `application_log_max_bytes` | Rotate the training application log after 16 MiB, only when the committed reader offset has reached its end |
+
+Restart the core, response worker and auditd after changing collection/storage limits. Each maintenance pass removes at most 100 completed cases and 500 obsolete model files. Active cases and their current model results are protected. Database pages are reclaimed incrementally; the installer converts older databases once while services are stopped. Application-log reading, writing and truncation share a file lock. If unread data or active evidence prevents cleanup, the terminal reports pressure instead of deleting it. SQLite rollback journals can temporarily require additional disk space. Quarantine backups, the training application's own database and system journals are outside this retention policy.
+
+Export a retained incident **before** its retention period expires:
+
+```bash
+sudo python3 /opt/defense-agent/maintenance.py CASE_ID --output /secure/path/incident.json
+```
+
+The export includes the case, normalized evidence, assessment history, response attempts and timings, creates a private file, and refuses to overwrite an existing path. Automatic retention is not an off-VM archive.
 
 ## Run on an isolated Ubuntu 24.04 VM
 
@@ -79,7 +109,7 @@ sudo bash aegis/install.sh
 ./aegis/watch.sh
 ```
 
-`watch.sh` opens the live console; `watch.sh --snapshot` prints one frame. Press `1` for both panels, `2` for events, `3` for cases, space to pause the display, and `q` to quit. Closing the console does not stop detection. The services are `defense-agent`, `defense-executor`, `defense-agent-ai`, `aegis-target-broker` and `aegis-target`.
+`watch.sh` opens the live console; `watch.sh --snapshot` prints one frame. Press `1` for both panels, `2` for events, `3` for cases, space to pause the display, and `q` to quit. Closing the console does not stop detection. The services are `defense-agent`, `defense-response`, `defense-executor`, `defense-agent-ai`, `aegis-target-broker` and `aegis-target`.
 
 The installer creates `/etc/defense-agent/config.json` if it is absent. Before enrolling any IP for automatic blocking, add administrator and VM addresses to `protected_ips`. Dedicated-source lists are empty by default, so IP blocking is off until explicitly configured. Keep the training target reachable only through an SSH tunnel, for example `ssh -L 18091:127.0.0.1:8081 user@vm`.
 
@@ -91,13 +121,23 @@ The training flow is `POST /login` with `{"username":"admin' --","password":"inc
 python3 -m unittest discover -s aegis/tests -q
 ```
 
-The current suite has **86 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+The current suite has **101 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
-The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, log rotation, sensor-loss alerting, load testing, and removal or stronger isolation of the privileged training broker.
+The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, external alert delivery, sustained load testing beyond the bounded lab burst, and removal or stronger isolation of the privileged training broker.
 
 Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated case data and deployment work files are excluded from Git.
 
 ## Change log
+
+### 2026-10-07 — Durable audit intake, independent responses and retention
+
+- Replaced the audit datagram handoff with a bounded, root-private SQLite inbox. Commit normalized evidence, partial file-event assembly and the consumer cursor together before acknowledging input. Preserve receive-time PID metadata across replay; retain accepted records and report rejected input when the inbox fills.
+- Moved response execution into the singleton `defense-response` service. The core only enrolls the approved plan, so executor delays no longer stop intake or correlation. Existing recovery, policy checks and verified-action requirements remain enforced.
+- Added terminal input rates, backlog and age, audit-loss and storage warnings, core-loop p95, response-worker status, and per-case collection/model/response timings.
+- Added configurable retention of completed cases, related history and obsolete model files, a SQLite allocation limit, incremental space reclamation and consumed-only application-log rotation. Active cases and unread application records are protected. Added private, non-overwriting incident export with evidence and response attempts.
+- Validated on the existing 4 GiB Azure VM: **101 unit tests and 61 live checks passed** (11 recovery/replay, 8 operations, 8 SSH, 17 application, 17 persistence). Included overflow, transaction rollback, restart between audit file records, retention protection, database allocation limits and export tests.
+- The real 200-process burst was fully observed in **1.331 seconds**, with no increase in kernel or inbox loss counters. In a separate fixture, the core consumed 100 records in **0.084 seconds** while an independent executor deliberately waited 15 seconds. These bounded lab measurements are not sustained-throughput or response-time guarantees.
+
 
 ### 2026-10-07 — Recoverable responses and continuous journal replay
 

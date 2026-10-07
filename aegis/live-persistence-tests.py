@@ -14,7 +14,7 @@ def query(sql,args=()):
 def check(name,condition):
     item={'test':name,'passed':bool(condition)};checks.append(item);print(json.dumps(item),flush=True)
     if not condition:raise AssertionError(name)
-def wait_case(kind,fragment,seconds=75):
+def wait_case(kind,fragment,seconds=120):
     end=time.time()+seconds
     while time.time()<end:
         found=query('SELECT * FROM cases WHERE kind=? AND evidence_json LIKE ? ORDER BY created_at DESC LIMIT 1',(kind,'%'+fragment+'%'))

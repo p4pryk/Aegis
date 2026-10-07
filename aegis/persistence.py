@@ -53,8 +53,8 @@ def quarantine(request):
 
 def audit(engine,kind,stamp,serial,content):
     if kind not in ('SYSCALL','1300','PATH','1302','EOE','1320'):return
-    now=time.monotonic();pending=getattr(engine,'persistence_pending',{});engine.persistence_pending=pending
-    expired=[k for k,v in pending.items() if now-v['received']>2]
+    now=time.time();pending=getattr(engine,'persistence_pending',{});engine.persistence_pending=pending
+    expired=[k for k,v in pending.items() if now-v['received']>600]
     for key in expired:pending.pop(key)
     if expired:engine.store.state('persistence_incomplete',{'time':time.time(),'expired_groups':len(expired)})
     key=engine.boot_id+':'+stamp+':'+serial
@@ -63,8 +63,7 @@ def audit(engine,kind,stamp,serial,content):
         fields=dict(re.findall(r'(\w+)=("[^"]*"|\S+)',content));fields={k:v.strip('"') for k,v in fields.items()}
         if fields.get('success')!='yes':return
         if len(pending)>=512:engine.store.state('persistence_overload',{'time':time.time()});return
-        from agent import process_snapshot
-        pid=int(fields['pid']);snap=process_snapshot(pid) or {}
+        pid=int(fields['pid']);snap=engine.audit_snapshot(pid) or {}
         pending[key]={'received':now,'paths':[],'details':{'pid':pid,'boot_id':engine.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'exe':fields.get('exe'),'start_ticks':snap.get('start_ticks'),'cgroup':snap.get('cgroup')}}
     elif kind in ('PATH','1302') and key in pending:
         match=re.search(r'\bname=("[^"]*"|\S+)',content)
@@ -75,7 +74,7 @@ def audit(engine,kind,stamp,serial,content):
         if scope(path) and len(pending[key]['paths'])<16:pending[key]['paths'].append((path,re.search(r'\bnametype=(\w+)',content)[1] if re.search(r'\bnametype=(\w+)',content) else 'UNKNOWN'))
     elif kind in ('EOE','1320') and key in pending:
         group=pending.pop(key)
-        for path,operation in set(group['paths']):
+        for path,operation in {tuple(item) for item in group['paths']}:
             details=dict(group['details'],path=path,operation=operation,mechanism=scope(path))
             event=engine.normalize('persistence_change',path,details,key+':file:'+hashlib.sha256(path.encode()).hexdigest()[:8],float(stamp))
             if engine.remember(event):

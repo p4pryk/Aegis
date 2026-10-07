@@ -1,0 +1,16 @@
+[Unit]
+Description=AEGIS durable response queue and retention
+After=defense-agent.service defense-executor.service
+Requires=defense-executor.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/defense-agent/response.py
+Restart=always
+RestartSec=1
+UMask=0027
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/defense-agent /var/lib/defense-agent-ai /var/log/defense-agent /run/defense-agent
+MemoryMax=128M
+[Install]
+WantedBy=multi-user.target
