@@ -102,6 +102,10 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     health=data.get('sensor_health',{});journal=health.get('journal');context=health.get('journal_context')
     drops='--' if not isinstance(journal,dict) or not isinstance(context,dict) else str(journal.get('dropped_events',0)+context.get('dropped_events',0))
     lines.append(fit('Events: '+str(total)+'  |  Cases: '+str(len(data.get('cases',[])))+'  |  Pending in view: '+str(queue)+'  |  Audit lost: '+str(health.get('audit',{}).get('lost','--'))+'  |  Journal queue drops: '+drops,width))
+    sources=[source for source in (journal,context) if isinstance(source,dict)]
+    gaps=sum(bool(source.get('cursor_gap_at')) for source in sources)
+    pressure=sum(source.get('backpressure_count',0) for source in sources)
+    lines.append(fit('Journal backpressure waits: '+str(pressure)+'  |  Cursor replay: '+('GAP REPORTED — CHECK JOURNAL RETENTION' if gaps else 'CHECKPOINTED' if len(sources)==2 else 'UNAVAILABLE'),width))
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
     if mode=='both' and width>=100:

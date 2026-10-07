@@ -32,7 +32,9 @@ class SSHSessions(unittest.TestCase):
     def test_positive_assessment_runs_complete_local_plan_if_model_returns_subset(self):
         row=self.build();expected=json.loads(row[2])['allowed_actions']
         self.apply(row,self.proposal(row,actions=expected[:1]))
-        self.assertEqual(self.status(row),'defended');self.assertEqual(self.actions,expected)
+        self.assertEqual(self.status(row),'defended')
+        self.assertEqual([{k:v for k,v in action.items() if k not in ('expected_uid','expires_at')} for action in self.actions],expected)
+        self.assertEqual(self.actions[0]['expected_uid'],1003)
         results=json.loads(self.store.db.execute('SELECT result_json FROM cases WHERE id=?',(row[0],)).fetchone()[0])
         self.assertEqual([item['action'] for item in results],expected)
         self.assertTrue(all(item['status']=='executed' and item['result']['verified'] for item in results))

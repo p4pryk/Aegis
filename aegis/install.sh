@@ -14,7 +14,7 @@ install -d -m 0700 /var/lib/aegis-target
 install -d -m 0750 -o root -g defense-ai /etc/defense-agent
 install -d -m 0750 /var/log/defense-agent
 install -d -m 0700 /root/.ssh
-for name in agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
+for name in response.py journal_stream.py agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
   install -m 0755 "$source_dir/$name" /opt/defense-agent/
 done
 if [ ! -f /etc/defense-agent/config.json ]; then

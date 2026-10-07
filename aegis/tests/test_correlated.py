@@ -90,7 +90,9 @@ class Correlation(unittest.TestCase):
         self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
     def test_unverified_executor_result_is_not_success(self):
         self.chain();row=self.awaiting();self.e.execute=lambda action:{'verified':False}
-        self.apply(row,self.proposal(row));self.assertEqual(self.status(row),'defense_error')
+        self.apply(row,self.proposal(row));self.assertEqual(self.status(row),'recognized')
+        self.e.tick(time.time()+6);self.e.tick(time.time()+17)
+        self.assertEqual(self.status(row),'defense_error')
     def test_duplicate_model_actions_are_rejected(self):
         self.chain();row=self.awaiting();action=json.loads(row[2])['allowed_actions'][0]
         self.apply(row,self.proposal(row,actions=[action,action]));self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)

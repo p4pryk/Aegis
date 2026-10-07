@@ -3,10 +3,16 @@ import ipaddress
 import json
 import pathlib
 import re
+import uuid
 
 SAFE = re.compile(r'[A-Za-z0-9_.@:-]{1,128}')
 ACCESS = re.compile(r'^(\S+) \S+ \S+ \[[^\]]+\] "([A-Z]{3,10}) (\S+) HTTP/[0-9.]+" ([0-9]{3}) (?:\d+|-)')
 SQLI = re.compile(r"(?i)(?:union(?:\s|%20|\+)+select|(?:%27|')\s*(?:or|and)(?:\s|%20|\+)+|(?:--|%2d%2d)|sleep(?:%28|\())")
+
+
+def normalize_boot_id(value):
+    # journald uses 32 hex digits; /proc exposes the same UUID with hyphens.
+    return str(uuid.UUID(value)) if isinstance(value, str) and re.fullmatch(r'[0-9a-fA-F]{32}', value) else value
 
 
 def command(config):
@@ -30,6 +36,9 @@ def command(config):
 
 
 def parse(record, boot_id, config):
+    boot_id = normalize_boot_id(record.get('_BOOT_ID'))
+    if not isinstance(boot_id, str) or not boot_id:
+        return None
     comm = str(record.get('_COMM', ''))
     ident = str(record.get('SYSLOG_IDENTIFIER', ''))
     unit = str(record.get('_SYSTEMD_UNIT', ''))

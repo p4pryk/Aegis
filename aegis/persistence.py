@@ -1,6 +1,8 @@
 """Bounded audit assembly, persistence observation and scoped containment."""
 import hashlib,json,os,pathlib,re,stat,time
 
+QUARANTINE = pathlib.Path('/var/lib/defense-agent/quarantine')
+
 def scope(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
@@ -18,13 +20,26 @@ def fingerprint(path):
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022 or info.st_size>65536:raise ValueError('Untrusted persistence file')
         return hashlib.sha256(f.read()).hexdigest(),(info.st_dev,info.st_ino)
 
+def inactive(path):
+    import subprocess
+    code=subprocess.run(['systemctl','is-active','--quiet',pathlib.Path(path).name]).returncode
+    if code not in (3,4):raise RuntimeError('Service inactivity not verified')
+
 def quarantine(request):
     from agent import run
     if set(request)!={'action','path','sha256'} or not lab_path(request['path']):raise ValueError('Persistence target outside training scope')
-    path=request['path'];digest,identity=fingerprint(path)
-    if digest!=request['sha256']:raise ValueError('Persistence file changed after assessment')
-    backup=pathlib.Path('/var/lib/defense-agent/quarantine');backup.mkdir(mode=0o700,exist_ok=True)
+    path=request['path'];digest=request['sha256']
+    backup=QUARANTINE;backup.mkdir(mode=0o700,exist_ok=True)
     target=backup/(pathlib.Path(path).name+'.'+digest)
+    if not os.path.lexists(path):
+        if fingerprint(target)[0]!=digest:raise ValueError('Quarantine backup does not match')
+        if scope(path)=='systemd':
+            run(['systemctl','stop',pathlib.Path(path).name],ok=(0,5))
+            run(['systemctl','daemon-reload'])
+            inactive(path)
+        return {'verified':True,'path':path,'sha256':digest,'backup':str(target),'removed_from_active_path':True,'already_quarantined':True}
+    current_digest,identity=fingerprint(path)
+    if current_digest!=digest:raise ValueError('Persistence file changed after assessment')
     if scope(path)=='systemd':
         run(['systemctl','disable','--now',pathlib.Path(path).name])
     current=os.lstat(path)
@@ -33,9 +48,7 @@ def quarantine(request):
     os.rename(path,target)
     if scope(path)=='systemd':run(['systemctl','daemon-reload'])
     if os.path.lexists(path) or fingerprint(target)[0]!=digest:raise RuntimeError('Persistence quarantine not verified')
-    if scope(path)=='systemd':
-        import subprocess
-        if subprocess.run(['systemctl','is-active','--quiet',pathlib.Path(path).name]).returncode==0:raise RuntimeError('Service still active')
+    if scope(path)=='systemd':inactive(path)
     return {'verified':True,'path':path,'sha256':digest,'backup':str(target),'removed_from_active_path':True}
 
 def audit(engine,kind,stamp,serial,content):

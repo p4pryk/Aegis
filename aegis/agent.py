@@ -80,6 +80,7 @@ class Executor:
             ip=safe_ip(request.get('ip'),self.c)
             if not ip: raise ValueError('protected or invalid IP')
             ttl=int(self.c['block_seconds'])
+            if 'expires_at' in request:ttl=min(ttl,int(request['expires_at']-time.time()))
             if not 1 <= ttl <= 3600: raise ValueError('invalid TTL')
             family='blocked4' if ipaddress.ip_address(ip).version==4 else 'blocked6'
             # add is idempotent while present; don't reset expiry on repeated incident.
@@ -113,6 +114,7 @@ class Executor:
             name=request.get('user','')
             if not re.fullmatch(r'lab_[a-z0-9_]{1,24}',name) or name in self.c['protected_users']: raise ValueError('account outside lab policy')
             account=pwd.getpwnam(name)
+            if type(request.get('expected_uid')) is not int or account.pw_uid!=request['expected_uid']:raise ValueError('Account identity changed')
             if account.pw_uid<1000 or account.pw_uid==65534 or account.pw_uid==os.getuid() and os.getuid()!=0: raise ValueError('protected uid')
             # Only local accounts, never modify directory users.
             local=[x.split(':') for x in pathlib.Path('/etc/passwd').read_text().splitlines()]
@@ -123,7 +125,7 @@ class Executor:
             updated=pwd.getpwnam(name)
             shadow=next(x.split(':') for x in pathlib.Path('/etc/shadow').read_text().splitlines() if x.split(':')[0]==name)
             p=subprocess.run(['pgrep','-u',str(account.pw_uid)],capture_output=True)
-            verified=updated.pw_shell=='/usr/sbin/nologin' and shadow[1].startswith('!') and shadow[7]=='1' and p.returncode==1
+            verified=updated.pw_uid==request['expected_uid'] and updated.pw_shell=='/usr/sbin/nologin' and shadow[1].startswith('!') and shadow[7]=='1' and p.returncode==1
             if not verified: raise RuntimeError('quarantine verification failed')
             return dict(verified=True,user=name,uid=account.pw_uid,locked=True,expired=True,no_processes=True)
         raise ValueError('unknown action')
@@ -177,6 +179,8 @@ class CorrelatedEngine:
         CREATE INDEX IF NOT EXISTS case_history_lookup ON case_status_history(case_id,time);
         CREATE TABLE IF NOT EXISTS pending_account_resolution(event_id TEXT PRIMARY KEY,event_time REAL,details_json TEXT,deadline REAL);
         CREATE TABLE IF NOT EXISTS ssh_sessions(identity TEXT PRIMARY KEY,event_id TEXT,event_time REAL,details_json TEXT,active INTEGER);''');self.db.commit()
+        import response
+        response.initialize(self.db)
         self.last_cleanup=0;self.last_session_reconcile=0
     def status(self,identifier,status,details=None):
         now=time.time();self.db.execute('UPDATE cases SET status=?,updated_at=? WHERE id=?',(status,now,identifier));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,status,now,canonical(details or {})));self.db.commit()
@@ -186,7 +190,7 @@ class CorrelatedEngine:
         cur=self.db.execute('INSERT OR IGNORE INTO correlation_events VALUES (?,?,?,?,?)',(event['event_id'],event['event_time'],event['kind'],event['subject'],canonical(event['details'])));self.db.commit();return bool(cur.rowcount)
     def create_or_append(self,kind,subject,event,extra=()):
         now=time.time()
-        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-120)).fetchone()
+        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-120)).fetchone()
         identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+event['event_id']).encode()).hexdigest()[:24]
         if not row:
             # Enrichment can revisit the same account after containment. Keep the
@@ -202,6 +206,8 @@ class CorrelatedEngine:
             if count>=256:break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
         if changed:
+            from response import archive
+            archive(self.db,identifier)
             self.db.execute("UPDATE cases SET updated_at=?,version=version+1,status='collecting',analysis_json='{}',result_json='{}' WHERE id=?",(now,identifier));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,'collecting',now,canonical({'reason':'new evidence invalidates analysis'})))
         self.db.commit();return identifier
     def normalize(self,kind,subject,details,event_id,timestamp):
@@ -210,7 +216,7 @@ class CorrelatedEngine:
     def failure(self,kind,ip,timestamp,event_id,rule=None,user=None):
         if kind!='ssh':return
         ip=safe_ip(ip,self.c)
-        if not ip or not isinstance(timestamp,(int,float)) or abs(time.time()-timestamp)>60:return
+        if not ip or not isinstance(timestamp,(int,float)) or not -5<=time.time()-timestamp<=600:return
         event=self.normalize('ssh_failure',ip,{'ip':ip,'user':user,'rule':str(rule)[:100] if rule else None},'ssh:'+event_id,timestamp)
         if self.remember(event):self.create_or_append('ssh_threshold',ip,event)
     def ssh_success(self,ip,user,timestamp,event_id,pid=None):
@@ -307,19 +313,38 @@ class CorrelatedEngine:
                 result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
         return result
     def enrich_app_cases(self):
-        rows=self.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('app_sql_login','app_sql_account','app_sql_persistence') AND status NOT IN ('defended','recognized','superseded') AND created_at>?",(time.time()-600,)).fetchall()
+        rows=self.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('app_sql_login','app_sql_account','app_sql_persistence') AND status NOT IN ('defended','recognized','superseded','defense_error') AND created_at>?",(time.time()-600,)).fetchall()
         for identifier,kind,subject in rows:
             for source in self.events(identifier):
                 if source['kind'] not in ('app_login','app_account_job','app_persistence_job'):continue
                 for context in self.http_request_context(source):self.create_or_append(kind,subject,context)
+    def journal_ssh(self,event):
+        from journal_sources import normalize_boot_id
+        if normalize_boot_id(event.get('_BOOT_ID'))!=self.boot_id:return
+        if event.get('_COMM') not in ('sshd','sshd-session') or str(event.get('_UID'))!='0':return
+        message=event.get('MESSAGE','')
+        m=re.search(r'^Failed (?:password|publickey) for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+) port \d+',message)
+        if not m:m=re.search(r'^Invalid user \S+ from ([0-9a-fA-F:.]+) port \d+',message)
+        event_id=event.get('__CURSOR',str(event['__REALTIME_TIMESTAMP']))
+        timestamp=int(event['__REALTIME_TIMESTAMP'])/1e6
+        if not -5<=time.time()-timestamp<=600:return
+        accepted=re.search(r'^Accepted (?:publickey|password) for (\S+) from ([0-9a-fA-F:.]+) port \d+',message)
+        if m:self.store.observe('sshd','ssh_auth_failure',m[1],'Authentication failed / unknown account.',event_id,timestamp)
+        elif accepted:self.store.observe('sshd','ssh_login_success',accepted[2],'Successful sign-in for account '+accepted[1][:50]+'.',event_id,timestamp)
+        else:self.store.observe('sshd','ssh_activity','sshd','SSH connection or session event.',event_id,timestamp)
+        if m:
+            user_match=re.search(r'^(?:Failed (?:password|publickey) for (?:invalid user )?|Invalid user )(\S+)',message)
+            self.failure('ssh',m[1],timestamp,event_id,user=user_match[1] if user_match else None)
+        elif accepted:self.ssh_success(accepted[2],accepted[1],timestamp,event_id,event.get('_PID'))
     def journal_context(self,raw):
         from journal_sources import parse
         event=parse(raw,self.boot_id,self.c)
-        if not event:return
+        if not event or not -5<=time.time()-event['event_time']<=600:return
         description=event['description']
         event=self.normalize(event['kind'],event['subject'],event['details'],event['event_id'],event['event_time'])
         if not self.remember(event):return
         self.store.observe('journald',event['kind'],event['subject'],description,event['event_id'],event['event_time'])
+        if event['details']['boot_id']!=self.boot_id:return
         if event['kind']=='http_sqli_signature':self.create_or_append('waf_threshold',event['subject'],event)
     def enrich_ssh_accounts(self):
         for r in self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='account_created' AND event_time>?",(time.time()-60,)).fetchall():
@@ -336,7 +361,7 @@ class CorrelatedEngine:
         match=re.match(r'^(?:node=\S+ )?type=(\w+)\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s*(.*)',line)
         if not match:return
         kind,stamp,serial,content=match.groups();timestamp=float(stamp)
-        if abs(time.time()-timestamp)>60:return
+        if not -5<=time.time()-timestamp<=600:return
         if self.c.get('persistence_enabled',False):
             from persistence import audit
             audit(self,kind,stamp,serial,content)
@@ -426,14 +451,14 @@ class CorrelatedEngine:
             current=parent
         return []
     def enrich_accounts(self,event):
-        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized') AND created_at>?",(time.time()-60,)).fetchall()
+        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error') AND created_at>?",(time.time()-60,)).fetchall()
         for row in rows:
             for account in self.events(row[0]):
                 if account['kind']=='account_created':
                     lineage=self.lineage(account)
                     if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
     def enrich_web_accounts(self):
-        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized') AND created_at>?",(time.time()-60,)).fetchall()
+        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error') AND created_at>?",(time.time()-60,)).fetchall()
         for row in rows:
             for account in self.events(row[0]):
                 if account['kind']=='account_created':
@@ -533,25 +558,26 @@ class CorrelatedEngine:
         try:analysis=self.validate_result((identifier,version,evidence),result)
         except (ValueError,TypeError,KeyError) as e:self.status(identifier,'analysis_error',{'error':str(e)});return
         analysis['origin']=str(result.get('model','unknown'))[:100]
-        # Durable description and recognized stage MUST precede any execution.
-        self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier));self.status(identifier,'recognized',{'version':version})
+        import response
         data=json.loads(evidence);fresh=self.snapshot(identifier,current[3],current[4],version)
-        if not data['allowed_actions']:self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence');return
-        minimum_confidence=data.get('policy',{}).get('minimum_confidence',.85)
-        if not analysis['attack'] or analysis['confidence']<minimum_confidence or not analysis['proposed_actions']:self.status(identifier,'observing');return
-        if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
-        results=[]
-        for action in analysis['proposed_actions']:
-            try:
-                started=time.monotonic();out=self.execute(action)
-                if not isinstance(out,dict) or out.get('verified') is not True:raise RuntimeError('executor did not verify action')
-                if action['action']=='terminate_session':
-                    self.db.execute('UPDATE ssh_sessions SET active=0 WHERE identity=?',(f"{action['boot_id']}:{action['session']}:{action['auid']}",))
-                out.update(executed_at=time.time(),execution_ms=round((time.monotonic()-started)*1000,3));out['reaction_ms']=round((out['executed_at']-max(e['event_time'] for e in data['events']))*1000,3);results.append({'action':action,'status':'executed','result':out})
-            except Exception as e:results.append({'action':action,'status':'failed','error':str(e)[:500]})
-        self.db.execute('UPDATE cases SET result_json=? WHERE id=?',(canonical(results),identifier));self.status(identifier,'defended' if all(x['status']=='executed' for x in results) else 'defense_error')
+        self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier))
+        if not data['allowed_actions']:
+            self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence');return
+        if not analysis['proposed_actions']:self.status(identifier,'observing');return
+        if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:
+            self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
+        # The plan and description become durable together, before the first action.
+        try:
+            response.prepare(self,identifier,data)
+        except Exception:
+            self.db.rollback()
+            raise
+        self.status(identifier,'recognized',{'version':version})
+        response.advance(self,identifier)
     def tick(self,now=None):
         now=time.time() if now is None else now
+        import response
+        response.resume(self,now)
         self.reconcile_sessions(now)
         self.resolve_pending(now)
         for identifier,created,updated,kind,subject,version in self.db.execute("SELECT id,created_at,updated_at,kind,subject,version FROM cases WHERE status='collecting'").fetchall():
@@ -595,7 +621,8 @@ def serve_executor(c):
             client.settimeout(3)
             try:result=executor.execute(json.loads(receive(client)));reply={'ok':True,'result':result}
             except Exception as e:reply={'ok':False,'error':str(e)[:500]}
-            client.send(json.dumps(reply).encode())
+            try:client.send(json.dumps(reply).encode())
+            except OSError:pass  # The caller may restart after the action already completed.
 
 def request_executor(c,request):
     with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as s:
@@ -612,70 +639,34 @@ def audit_plugin():
             try:s.sendto(line.encode()[:60000],DEFAULTS['audit_socket'])
             except OSError as e:print(f'defense-agent audit delivery failed: {e}',file=sys.stderr,flush=True)
 
-def journal_reader(queue):
-    # journal metadata is trusted, MESSAGE content alone is never sufficient.
-    while True:
-        p=subprocess.Popen(['journalctl','-f','-n','0','-o','json','_COMM=sshd','_COMM=sshd-session'],stdout=subprocess.PIPE,text=True)
-        JOURNAL_HEALTH['connected']=True
-        for line in p.stdout:
-            JOURNAL_HEALTH['last_received_at']=time.time()
-            try:queue.put(('ssh',json.loads(line)),timeout=1)
-            except Exception:JOURNAL_HEALTH['dropped_events']+=1
-        JOURNAL_HEALTH['connected']=False
-        time.sleep(1)
-
-def journal_context_reader(queue,c):
-    from journal_sources import command
-    while True:
-        args=command(c)
-        if not args:
-            JOURNAL_CONTEXT_HEALTH['connected']=False;time.sleep(5);continue
-        try:
-            p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,errors='replace')
-            JOURNAL_CONTEXT_HEALTH['connected']=True
-            for line in p.stdout:
-                try:queue.put(('journal_context',json.loads(line)),timeout=1)
-                except Exception:JOURNAL_CONTEXT_HEALTH['dropped_events']+=1
-        except OSError:
-            JOURNAL_CONTEXT_HEALTH['connected']=False
-        JOURNAL_CONTEXT_HEALTH['connected']=False
-        time.sleep(1)
-
 def serve_core(c):
     import queue
+    from journal_stream import Checkpoints,reader
     if c.get('mode','correlated')!='correlated':raise ValueError('Only correlated analyze-before-defense mode is permitted')
     store=Store(c);engine=CorrelatedEngine(c,store,lambda r:request_executor(c,r));s=credential_socket(c['audit_socket'],socket.SOCK_DGRAM);s.settimeout(.05)
     events=queue.Queue(maxsize=4096)
-    threading.Thread(target=journal_reader,args=(events,),daemon=True).start()
-    threading.Thread(target=journal_context_reader,args=(events,c),daemon=True).start()
+    checkpoints=Checkpoints(store)
+    threading.Thread(target=reader,args=(events,'ssh',c,checkpoints,JOURNAL_HEALTH),daemon=True).start()
+    threading.Thread(target=reader,args=(events,'journal_context',c,checkpoints,JOURNAL_CONTEXT_HEALTH),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
     while True:
         try:engine.account(receive(s).decode(errors='replace'))
         except socket.timeout:pass
         except Exception as e:print('audit input rejected:',e,flush=True)
-        context_batch=False
+        context_batch=False;processed={}
         for _ in range(100):
             try:kind,event=events.get_nowait()
             except queue.Empty:break
             if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
-            if kind=='journal_context':engine.journal_context(event);context_batch=True;continue
-            if event.get('_COMM') not in ('sshd','sshd-session') or str(event.get('_UID'))!='0':continue
-            message=event.get('MESSAGE','')
-            m=re.search(r'^Failed (?:password|publickey) for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+) port \d+',message)
-            if not m:m=re.search(r'^Invalid user \S+ from ([0-9a-fA-F:.]+) port \d+',message)
-            event_id=event.get('__CURSOR',str(event['__REALTIME_TIMESTAMP']))
-            timestamp=int(event['__REALTIME_TIMESTAMP'])/1e6
-            accepted=re.search(r'^Accepted (?:publickey|password) for (\S+) from ([0-9a-fA-F:.]+) port \d+',message)
-            if m:store.observe('sshd','ssh_auth_failure',m[1],'Authentication failed / unknown account.',event_id,timestamp)
-            elif accepted:store.observe('sshd','ssh_login_success',accepted[2],'Successful sign-in for account '+accepted[1][:50]+'.',event_id,timestamp)
-            else:store.observe('sshd','ssh_activity','sshd','SSH connection or session event.',event_id,timestamp)
-            if m:
-                user_match=re.search(r'^(?:Failed (?:password|publickey) for (?:invalid user )?|Invalid user )(\S+)',message)
-                engine.failure('ssh',m[1],timestamp,event_id,user=user_match[1] if user_match else None)
-            elif accepted:engine.ssh_success(accepted[2],accepted[1],timestamp,event_id,event.get('_PID'))
+            try:
+                if kind=='journal_context':engine.journal_context(event);context_batch=True
+                elif kind=='ssh':engine.journal_ssh(event)
+            except (ValueError,TypeError,KeyError) as exc:
+                store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
+            processed[kind]=event
         if context_batch:
             engine.enrich_ssh_accounts();engine.enrich_web_accounts()
-        store.db.commit()
+        checkpoints.commit(store,processed)
         if c.get('application_enabled',False):
             try:
                 from app_correlation import ingest

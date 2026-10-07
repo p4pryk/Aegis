@@ -12,7 +12,7 @@ class JournalTelemetryTests(unittest.TestCase):
         self.ip='198.51.100.24';self.request_id='a'*32;self.when=time.time()
 
     def record(self,unit,message,offset=0,comm='python3'):
-        return {'_SYSTEMD_UNIT':unit,'_COMM':comm,'MESSAGE':message,'__REALTIME_TIMESTAMP':str(int((self.when+offset)*1_000_000)),'__CURSOR':unit+str(offset)}
+        return {'_BOOT_ID':self.engine.boot_id,'_SYSTEMD_UNIT':unit,'_COMM':comm,'MESSAGE':message,'__REALTIME_TIMESTAMP':str(int((self.when+offset)*1_000_000)),'__CURSOR':unit+str(offset)}
 
     def test_http_request_id_joins_broker_case_and_proxy_stays_context(self):
         login=self.engine.normalize('app_login','request',{'request_id':self.request_id,'ip':self.ip,'bypass':True,'success':True},'app:login',self.when)
