@@ -99,11 +99,12 @@ def event_lines(data,width):
         lines.extend(wrapped(view['message'],width,view['level']));lines.append('')
     return lines or wrapped('Waiting for events.',width)
 
+def source_heading(width):
+    return ["="*width,Line(fit("SOURCE HEALTH".center(width),width)),"-"*width]
+
 def source_lines(data,width,now):
     from monitoring import visible_sources
-    lines=wrapped('SOURCE HEALTH / checked every 5s / kernel audit probe every 30s',width)
-    lines+=wrapped('QUIET means the collector is alive, not that the source is disconnected.',width)
-    lines.append('-'*width)
+    lines=[]
     for source in visible_sources(data,now):
         status=source['status'];level='critical' if status in ('DOWN','STALE') else 'warning' if status in ('GAP','LAGGING','UNKNOWN') else 'healthy' if status in ('LIVE','QUIET') else 'neutral'
         marker='[OK]' if status in ('LIVE','QUIET') else '[--]' if status=='DISABLED' else '[!!]'
@@ -111,6 +112,9 @@ def source_lines(data,width,now):
         last=source.get('last_record_at');age=f"{max(0,now-last):.0f}s ago" if last else 'not seen in this collector session'
         lines.extend(wrapped('     Last intake: '+age+' | Pending: '+str(source.get('pending',0))+' '+source.get('unit','records')+f" | Delay: {source.get('lag_seconds',0):.1f}s",width))
         lines.extend(wrapped('     '+source.get('reason',''),width,level));lines.append('')
+    lines.append('-'*width)
+    lines.extend(wrapped('Checked every 5s / kernel audit probe every 30s',width))
+    lines.extend(wrapped('QUIET means the collector is alive, not that the source is disconnected.',width))
     lines.extend(wrapped('Scope: selected journal streams, kernel audit and the trusted application log. Liveness does not prove that every application emits logs. Historical gaps remain warnings after recovery.',width))
     return lines
 
@@ -119,7 +123,9 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     if width<32 or height<12:
         compact=[fit('[<>] AEGIS / DEFENSE AGENT',width),fit('Enlarge the terminal window.',width)]
         return (compact+[' '*width]*height)[:max(0,height-1)]+[fit('[q] quit',width)]
-    lines=logo(width);lines.append('='*width)
+    lines=logo(width)
+    if mode=='sources':lines.extend(source_heading(width))
+    else:lines.append('='*width)
     heartbeat=data.get('heartbeat',{});healthy=0<=now-heartbeat.get('time',0)<15
     status='DATA UNAVAILABLE' if error else 'DISPLAY PAUSED' if paused else 'AGENT ONLINE' if healthy else 'CHECK AGENT'
     lines.append(fit('['+status+']  '+stamp(now)+'  |  audit / SSH / application / journald',width))
@@ -199,7 +205,7 @@ def main():
     except (OSError,ValueError,sqlite3.Error):error=True
     size=shutil.get_terminal_size((104,32));width=args.width or size.columns;height=args.height or size.lines
     if args.snapshot or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        output=logo(width)+source_lines(data,width,time.time()) if args.sources else logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
+        output=logo(width)+source_heading(width)+source_lines(data,width,time.time()) if args.sources else logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
         print('\n'.join(line.rstrip() for line in output))
         return
     import termios,tty

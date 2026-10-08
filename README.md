@@ -165,6 +165,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-10-08 — Source-health header alignment
+
+- Center `SOURCE HEALTH` directly beneath the shields in the interactive source view and snapshots; keep the title fixed while scrolling. Use the same horizontal separators as the main view. Move refresh timing and the `QUIET` explanation below the source list.
+- Validated on the Azure VM: **21 source-health/incident-view tests** and **60 terminal size/scroll combinations** passed.
+
 ### 2026-10-08 — Per-source collection health in the terminal
 
 - Add a source-health screen (`5` / `--sources`) and an always-visible summary, with green live/quiet states, yellow backlog/gap warnings and red down/stale states. Display intake age, backlog and the reason for each status.
