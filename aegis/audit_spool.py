@@ -9,9 +9,9 @@ import uuid
 
 
 def selected(line):
-    return bool(re.search(r'^(?:node=\S+ )?type=(?:ADD_USER|1114|SYSCALL|1300|PATH|1302|EOE|1320|USER_LOGIN|1112|USER_START|1105|USER_END|1106)\s', line)) and (
+    return bool(re.search(r'^(?:node=\S+ )?type=(?:USER_CHAUTHTOK|1108|GRP_CHAUTHTOK|1133|CHUSER_ID|1125|ACCT_LOCK|1135|ACCT_UNLOCK|1136|USER_MGMT|1102|GRP_MGMT|1132|ADD_GROUP|1116|DEL_GROUP|1117|CHGRP_ID|1119|DEL_USER|1115|CWD|1307|ADD_USER|1114|SYSCALL|1300|PATH|1302|EOE|1320|USER_LOGIN|1112|USER_START|1105|USER_END|1106)\s', line)) and (
         not re.search(r'type=(?:SYSCALL|1300)\s', line) or
-        bool(re.search(r'\bkey="?(?:lab_root_exec|aegis_app_exec|aegis_persistence)"?(?:\s|$)', line)))
+        bool(re.search(r'\bkey="?(?:lab_root_exec|aegis_app_exec|aegis_persistence|aegis_identity)"?(?:\s|$)', line)))
 
 
 class Spool:

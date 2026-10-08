@@ -69,7 +69,7 @@ def case_lines(data,width):
         lines.extend(wrapped(view['status_label'],width,view['level']))
         if login:
             d=login.get('details',{});lines.extend(wrapped('SSH '+str(d.get('user','--'))+' @ '+str(d.get('ip','--'))+' / session '+str(d.get('session','--')),width))
-        lines.extend(wrapped('Evidence: '+str(len(evidence.get('events',[])))+' / links: '+str(len(evidence.get('edges',[]))),width))
+        lines.extend(wrapped('Case: '+str(case.get('id','--'))+' / Evidence: '+str(len(evidence.get('events',[])))+' / links: '+str(len(evidence.get('edges',[]))),width))
         # The model may include an application session token in its narrative.
         summary=re.sub(r'\b[0-9a-f]{32}\b','[session redacted]',view['summary'],flags=re.I)
         lines.extend(wrapped(summary,width))
@@ -80,6 +80,17 @@ def case_lines(data,width):
         lines.append('-'*width)
     return lines or wrapped('Waiting for the first incident.',width)
 
+def chain_lines(data,width,case_id=None):
+    from incident_view import timeline
+    cases=sorted(data.get('cases',[]),key=lambda c:c.get('updated_at',0),reverse=True)
+    case=next((c for c in cases if c['id']==case_id),None) if case_id else next(iter(cases),None)
+    if not case:return wrapped('Selected case is not available. Use n/p to choose another case.',width)
+    lines=[]
+    for text,level in timeline(case):
+        text=re.sub(r'\b[0-9a-f]{32}\b','[identifier redacted]',text,flags=re.I)
+        lines.extend(wrapped(text,width,level))
+    return lines
+
 def event_lines(data,width):
     lines=[]
     for event in sorted(data.get('observations',[]),key=lambda e:e.get('time',0),reverse=True):
@@ -88,7 +99,7 @@ def event_lines(data,width):
         lines.extend(wrapped(view['message'],width,view['level']));lines.append('')
     return lines or wrapped('Waiting for events.',width)
 
-def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None):
+def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None,case_id=None,offset=0):
     width=max(1,width);height=max(1,height);now=time.time() if now is None else now
     if width<32 or height<12:
         compact=[fit('[<>] AEGIS / DEFENSE AGENT',width),fit('Enlarge the terminal window.',width)]
@@ -116,7 +127,11 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
-    if mode=='both' and width>=100:
+    if mode=='chain':
+        body=chain_lines(data,width,case_id)
+        offset=min(max(0,offset),max(0,len(body)-body_rows))
+        lines.extend((body[offset:offset+body_rows]+[' '*width]*body_rows)[:body_rows])
+    elif mode=='both' and width>=100:
         left=max(32,int((width-3)*.40));right=width-left-3
         events=[fit('EVENTS / LATEST FIRST',left),'-'*left]+event_lines(data,left)
         cases=[fit('ASSESSMENT / RESPONSE',right),'-'*right]+case_lines(data,right)
@@ -134,10 +149,10 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         lines.extend(([fit(title,width),'-'*width]+body+[' '*width]*body_rows)[:body_rows])
     lines=lines[:max(0,height-2)]
     lines+=[' '*width]*(max(0,height-2)-len(lines))
-    lines.append('-'*width);lines.append(fit('[1] all  [2] events  [3] cases  [space] pause  [q] quit',width))
+    lines.append('-'*width);lines.append(fit('[1/2/3] views [4] chain [n/p] case [j/k] scroll [space] pause [q] quit',width))
     return lines[:height]
 
-def read_snapshot(database):
+def read_snapshot(database,case_id=None):
     # Read-only URI and query_only enforce a viewer with no database mutations.
     from pathlib import Path
     uri=Path(database).resolve().as_uri()+'?mode=ro'
@@ -145,6 +160,8 @@ def read_snapshot(database):
     try:
         conn.execute('PRAGMA query_only=ON');conn.row_factory=sqlite3.Row
         cases=[dict(r) for r in conn.execute('SELECT * FROM cases ORDER BY updated_at DESC LIMIT 40')]
+        if case_id and not any(c['id']==case_id for c in cases):
+            cases.extend(dict(r) for r in conn.execute('SELECT * FROM cases WHERE id=?',(case_id,)))
         events=[dict(r) for r in conn.execute('SELECT * FROM observations ORDER BY rowid DESC LIMIT 60')]
         metrics=[dict(r) for r in conn.execute('SELECT * FROM sensor_metrics')]
         states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker')")}
@@ -156,22 +173,24 @@ def read_snapshot(database):
 def main():
     parser=argparse.ArgumentParser(description='AEGIS Defense Agent: live terminal interface')
     parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db');parser.add_argument('--snapshot',action='store_true');parser.add_argument('--data-file');parser.add_argument('--width',type=int);parser.add_argument('--height',type=int)
+    parser.add_argument('--case',help='Keep a case selected; with --snapshot print its complete chain')
     args=parser.parse_args();data={};error=None
-    try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database)
+    try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,args.case)
     except (OSError,ValueError,sqlite3.Error):error=True
     size=shutil.get_terminal_size((104,32));width=args.width or size.columns;height=args.height or size.lines
     if args.snapshot or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print('\n'.join(line.rstrip() for line in render(data,width,height,error=error)))
+        output=logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
+        print('\n'.join(line.rstrip() for line in output))
         return
     import termios,tty
-    original=termios.tcgetattr(sys.stdin);paused=False;mode='both';next_poll=time.monotonic()+1;previous=None
+    original=termios.tcgetattr(sys.stdin);paused=False;mode='chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
     def stop(signum,frame):raise KeyboardInterrupt
     old_signal=signal.signal(signal.SIGTERM,stop)
     try:
         tty.setcbreak(sys.stdin.fileno());sys.stdout.write('\x1b[?1049h\x1b[?25l');sys.stdout.flush()
         while True:
             size=shutil.get_terminal_size((104,32));width=args.width or size.columns;height=args.height or size.lines
-            lines=render(data,max(1,width-1),height,mode,paused,error)
+            lines=render(data,max(1,width-1),height,mode,paused,error,case_id=selected,offset=offset)
             # Cursor home + erase each row: no appended lines, no scrollback growth.
             if lines!=previous:
                 header_height=len(logo(max(1,width-1)))
@@ -185,9 +204,16 @@ def main():
                 key=os.read(sys.stdin.fileno(),1)
                 if key in (b'q',b'Q',b'\x03',b'\x04'):break
                 if key==b' ':paused=not paused
-                if key in (b'1',b'2',b'3'):mode={b'1':'both',b'2':'events',b'3':'cases'}[key]
+                if key in (b'1',b'2',b'3',b'4'):
+                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain'}[key];offset=0
+                    if mode=='chain' and not selected:selected=next((c['id'] for c in data.get('cases',[])),None)
+                if mode=='chain' and key in (b'n',b'p'):
+                    ids=[c['id'] for c in sorted(data.get('cases',[]),key=lambda c:c.get('updated_at',0),reverse=True)]
+                    if ids:selected=ids[((ids.index(selected) if selected in ids else 0)+(1 if key==b'n' else -1))%len(ids)];offset=0
+                if mode=='chain' and key in (b'j',b'k'):
+                    offset=max(0,min(len(chain_lines(data,width,selected))-1,offset+(3 if key==b'j' else -3)))
             if not paused and time.monotonic()>=next_poll:
-                try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database);error=None
+                try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,selected);error=None
                 except (OSError,ValueError,sqlite3.Error):error=True
                 next_poll=time.monotonic()+1;previous=None
     except KeyboardInterrupt:pass

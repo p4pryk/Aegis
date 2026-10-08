@@ -212,9 +212,12 @@ class CorrelatedEngine:
         return [dict(event_id=r[0],event_time=r[1],kind=r[2],subject=r[3],details=json.loads(r[4])) for r in self.db.execute('SELECT event_id,event_time,kind,subject,details_json FROM case_events WHERE case_id=? ORDER BY event_time,event_id',(identifier,))]
     def remember(self,event):
         cur=self.db.execute('INSERT OR IGNORE INTO correlation_events VALUES (?,?,?,?,?)',(event['event_id'],event['event_time'],event['kind'],event['subject'],canonical(event['details'])));self.db.commit();return bool(cur.rowcount)
-    def create_or_append(self,kind,subject,event,extra=()):
+    def create_or_append(self,kind,subject,event,extra=(),case_id=None):
         now=time.time()
         row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-120)).fetchone()
+        if case_id:
+            row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
+            if not row:return None
         identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+event['event_id']).encode()).hexdigest()[:24]
         if not row:
             # Enrichment can revisit the same account after containment. Keep the
@@ -227,7 +230,7 @@ class CorrelatedEngine:
         changed=False
         for e in [*extra,event]:
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
-            if count>=256:break
+            if count>=(64 if kind=='host_change' else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
         if changed:
             from response import archive
@@ -297,16 +300,8 @@ class CorrelatedEngine:
             if e['details'].get('user')==ld['user']:failures.append(e)
         return [*failures[-32:],login,producer,account]
     def session_context_events(self,login,until):
-        d=login['details'];session=str(d.get('session',''));auid=str(d.get('auid',''))
-        if not session.isdigit() or not auid.isdigit():return []
-        kinds=('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event')
-        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN (?,?,?,?,?) AND event_time BETWEEN ? AND ? ORDER BY event_time LIMIT 512",(*kinds,login['event_time']-self.c.get('ssh_compromise_window',300),until)).fetchall()
-        result=[]
-        for r in rows:
-            details=json.loads(r[4])
-            if details.get('boot_id')==d.get('boot_id') and str(details.get('audit_session'))==session and str(details.get('auid'))==auid:
-                result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
-        return result
+        from telemetry import session_events
+        return session_events(self,login,until)
     def web_context_events(self,lineage,until):
         if not lineage:return []
         units=set(self.c.get('web_units',[]));observed=set()
@@ -394,6 +389,8 @@ class CorrelatedEngine:
         event_id=self.boot_id+':'+stamp+':'+serial
         header=content.split('msg=',1)[0]
         fields=dict(re.findall(r'(\w+)=("[^"]*"|\S+)',header));fields={k:v.strip('"') for k,v in fields.items()}
+        from telemetry import management
+        management(self,kind,content,event_id,timestamp,fields)
         if kind in ('USER_START','1105','USER_END','1106'):
             self.session_record(kind,fields,content,event_id,timestamp)
         elif kind in ('SYSCALL','1300'):
@@ -544,6 +541,8 @@ class CorrelatedEngine:
                 app_kind={'/login':'app_login','/accounts':'app_account_job','/persistence':'app_persistence_job'}.get(request['details'].get('path'))
                 match=next((e for e in events if e['kind']==app_kind and e['details'].get('ip')==request['details'].get('ip') and abs(e['event_time']-request['event_time'])<=2),None) if app_kind else None
                 if match:edges.append({'from':request['event_id'],'to':match['event_id'],'relation':'same_ip_and_path_nearby_time_context_not_causal'})
+        from telemetry import links
+        edges.extend(edge for edge in links(events) if edge not in edges)
         actor=next((e['details']['user'] for e in events if e['kind']=='ssh_session_open'),None);authorization='not_established'
         account=next((e for e in reversed(events) if e['kind']=='account_created'),None)
         if kind=='persistence_change':
@@ -608,6 +607,8 @@ class CorrelatedEngine:
         if self.execute is not None:response.resume(self,now)
         self.reconcile_sessions(now)
         self.resolve_pending(now)
+        from telemetry import enrich
+        enrich(self,now)
         for identifier,created,updated,kind,subject,version in self.db.execute("SELECT id,created_at,updated_at,kind,subject,version FROM cases WHERE status='collecting'").fetchall():
             if now-updated>=self.c.get('correlation_quiet_seconds',2) or now-created>=self.c.get('correlation_max_seconds',5):
                 evidence=canonical(self.snapshot(identifier,kind,subject,version));self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,identifier));self.status(identifier,'awaiting_analysis',{'version':version,'snapshot_hash':hashlib.sha256(evidence.encode()).hexdigest()})

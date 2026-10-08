@@ -16,7 +16,7 @@ install -d -m 0700 /var/lib/aegis-target
 install -d -m 0750 -o root -g defense-ai /etc/defense-agent
 install -d -m 0750 /var/log/defense-agent
 install -d -m 0700 /root/.ssh
-for name in audit_spool.py monitoring.py maintenance.py response.py journal_stream.py agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
+for name in incident_view.py telemetry.py audit_spool.py monitoring.py maintenance.py response.py journal_stream.py agent.py ai_worker.py app_correlation.py journal_sources.py persistence.py vulnerable_app.py console.py presentation.py; do
   install -m 0755 "$source_dir/$name" /opt/defense-agent/
 done
 if [ ! -f /etc/defense-agent/config.json ]; then
@@ -58,12 +58,21 @@ fi
 uid=$(id -u aegis-target)
 cat > /etc/audit/rules.d/aegis-observe.rules <<EOF
 -a always,exit -F arch=b64 -S execve,execveat -F euid=$uid -k aegis_app_exec
+-w /etc/passwd -p wa -k aegis_identity
+-w /etc/shadow -p wa -k aegis_identity
+-w /etc/group -p wa -k aegis_identity
+-w /etc/gshadow -p wa -k aegis_identity
+-w /etc/sudoers -p wa -k aegis_identity
+-w /etc/sudoers.d -p wa -k aegis_identity
 -w /etc/crontab -p wa -k aegis_persistence
 -w /etc/cron.d -p wa -k aegis_persistence
 -w /etc/systemd/system -p wa -k aegis_persistence
 -w /home -p wa -k aegis_persistence
 -w /root/.ssh -p wa -k aegis_persistence
 EOF
+for path in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron/crontabs; do
+  [ ! -d "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
+done
 # Preserve the existing administrator's access while making SSH failures observable.
 printf '%s\n' 'LogLevel VERBOSE' > /etc/ssh/sshd_config.d/60-aegis-observability.conf
 /usr/sbin/sshd -t

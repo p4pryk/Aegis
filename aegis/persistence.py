@@ -1,5 +1,5 @@
 """Bounded audit assembly, persistence observation and scoped containment."""
-import hashlib,json,os,pathlib,re,stat,time
+import hashlib,json,os,pathlib,posixpath,re,stat,time
 
 QUARANTINE = pathlib.Path('/var/lib/defense-agent/quarantine')
 
@@ -7,8 +7,8 @@ def scope(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
     if p.name=='authorized_keys' and p.parent.name=='.ssh':return 'ssh_key'
-    if str(p)=='/etc/crontab' or str(p.parent)=='/etc/cron.d':return 'cron'
-    if str(p.parent)=='/etc/systemd/system' and p.suffix=='.service':return 'systemd'
+    if str(p)=='/etc/crontab' or str(p.parent) in ('/etc/cron.d','/etc/cron.hourly','/etc/cron.daily','/etc/cron.weekly','/etc/cron.monthly','/var/spool/cron/crontabs'):return 'cron'
+    if '/'.join(p.parts[1:4])=='etc/systemd/system' and len(p.parts)<=6 and p.suffix in ('.service','.timer','.conf'):return 'systemd'
 
 def lab_path(path):
     return bool(re.fullmatch(r'/etc/cron.d/lab_aegis_[a-z0-9_]{1,20}|/etc/systemd/system/lab-aegis-[a-z0-9-]{1,20}\.service',path))
@@ -51,35 +51,61 @@ def quarantine(request):
     if scope(path)=='systemd':inactive(path)
     return {'verified':True,'path':path,'sha256':digest,'backup':str(target),'removed_from_active_path':True}
 
+def watched_path(path):
+    p=pathlib.PurePosixPath(path)
+    if not p.is_absolute() or '..' in p.parts:return None
+    if path in ('/etc/passwd','/etc/shadow','/etc/group','/etc/gshadow','/etc/sudoers') or str(p.parent)=='/etc/sudoers.d':return 'identity_permissions'
+    return scope(path)
+
+
+def audit_text(value):
+    try:return value[1:-1] if value.startswith('"') and value.endswith('"') else bytes.fromhex(value).decode()
+    except (ValueError,UnicodeError):return None
+
+
 def audit(engine,kind,stamp,serial,content):
-    if kind not in ('SYSCALL','1300','PATH','1302','EOE','1320'):return
+    if kind not in ('SYSCALL','1300','PATH','1302','CWD','1307','EOE','1320'):return
     now=time.time();pending=getattr(engine,'persistence_pending',{});engine.persistence_pending=pending
     expired=[k for k,v in pending.items() if now-v['received']>600]
     for key in expired:pending.pop(key)
     if expired:engine.store.state('persistence_incomplete',{'time':time.time(),'expired_groups':len(expired)})
     key=engine.boot_id+':'+stamp+':'+serial
+    fields=dict(re.findall(r'(\w+)=("[^"]*"|\S+)',content))
     if kind in ('SYSCALL','1300'):
-        if 'aegis_persistence' not in content:return
-        fields=dict(re.findall(r'(\w+)=("[^"]*"|\S+)',content));fields={k:v.strip('"') for k,v in fields.items()}
-        if fields.get('success')!='yes':return
+        fields={k:v.strip('"') for k,v in fields.items()}
+        if fields.get('key') not in ('aegis_persistence','aegis_identity') or fields.get('success')!='yes':return
         if len(pending)>=512:engine.store.state('persistence_overload',{'time':time.time()});return
         pid=int(fields['pid']);snap=engine.audit_snapshot(pid) or {}
-        pending[key]={'received':now,'paths':[],'details':{'pid':pid,'boot_id':engine.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'exe':fields.get('exe'),'start_ticks':snap.get('start_ticks'),'cgroup':snap.get('cgroup')}}
+        pending[key]={'received':now,'paths':[],'details':{'pid':pid,'boot_id':engine.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'exe':fields.get('exe'),'syscall':fields.get('syscall'),'source':'auditd','start_ticks':snap.get('start_ticks'),'cgroup':snap.get('cgroup')}}
+    elif kind in ('CWD','1307') and key in pending:
+        cwd=audit_text(fields.get('cwd',''))
+        if cwd and cwd.startswith('/'):pending[key]['cwd']=cwd
     elif kind in ('PATH','1302') and key in pending:
-        match=re.search(r'\bname=("[^"]*"|\S+)',content)
-        if not match:return
-        value=match[1]
-        try:path=value[1:-1] if value.startswith('"') else bytes.fromhex(value).decode()
-        except (ValueError,UnicodeError):return
-        if scope(path) and len(pending[key]['paths'])<16:pending[key]['paths'].append((path,re.search(r'\bnametype=(\w+)',content)[1] if re.search(r'\bnametype=(\w+)',content) else 'UNKNOWN'))
+        path=audit_text(fields.get('name',''))
+        if not path or len(pending[key]['paths'])>=16:return
+        # Resolve relative names only when the same audit event supplies a CWD.
+        metadata={k:fields[k].strip('"') for k in ('mode','ouid','ogid') if k in fields}
+        pending[key]['paths'].append([path,fields.get('nametype','UNKNOWN'),metadata])
     elif kind in ('EOE','1320') and key in pending:
-        group=pending.pop(key)
-        for path,operation in {tuple(item) for item in group['paths']}:
-            details=dict(group['details'],path=path,operation=operation,mechanism=scope(path))
-            event=engine.normalize('persistence_change',path,details,key+':file:'+hashlib.sha256(path.encode()).hexdigest()[:8],float(stamp))
+        group=pending.pop(key);seen=set()
+        for item in group['paths']:
+            path,operation=item[:2];metadata=item[2] if len(item)>2 else {}
+            if not path.startswith('/'):
+                if not group.get('cwd'):continue
+                path=posixpath.normpath(posixpath.join(group['cwd'],path))
+            mechanism=watched_path(path)
+            if not mechanism or (path,operation) in seen:continue
+            seen.add((path,operation))
+            details=dict(group['details'],path=path,operation=operation,mechanism=mechanism,audited_inode=metadata)
+            event_kind='security_file_change' if mechanism=='identity_permissions' else 'persistence_change'
+            event=engine.normalize(event_kind,path,details,key+':file:'+hashlib.sha256((path+':'+operation).encode()).hexdigest()[:12],float(stamp))
             if engine.remember(event):
-                engine.store.observe('auditd','persistence_change',path,'Persistence-related file changed; awaiting actor and session correlation.',event['event_id'],event['event_time'])
-                if operation not in ('DELETE','DELETED'):engine.create_or_append('persistence_change',path,event)
+                engine.store.observe('auditd',event_kind,path,'Security-related file changed; correlating actor/session metadata, not file contents.',event['event_id'],event['event_time'])
+                if event_kind=='security_file_change':
+                    from telemetry import identity
+                    subject=':'.join(identity(details) or (engine.boot_id,'unattributed'))
+                    engine.create_or_append('host_change',subject,event)
+                elif operation not in ('DELETE','DELETED'):engine.create_or_append('persistence_change',path,event)
 
 def chain(engine,job):
     d=job['details'];row=engine.db.execute('SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE event_id=?',('app:'+d['login_id'],)).fetchone()

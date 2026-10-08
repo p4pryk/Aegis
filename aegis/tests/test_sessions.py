@@ -20,7 +20,7 @@ class SSHSessions(unittest.TestCase):
             if login:self.e.audit_line(f'type=USER_START msg=audit({now-.2}:1): pid=100 uid=0 auid=1002 ses=42 msg=\'op=PAM:session_open acct="lab_actor" exe="/usr/sbin/sshd" addr=198.51.100.9 terminal=ssh res=success\'')
             self.e.audit_line(f'type=SYSCALL msg=audit({now-.1}:2): success=yes pid=200 ppid=100 uid=0 auid=1002 ses={session} exe="/usr/sbin/useradd" key="lab_root_exec"')
             self.e.audit_line(f'type=ADD_USER msg=audit({now}:3): pid=200 uid=0 auid=1002 ses={session} msg=\'op=adding user acct="lab_added" res=success\'')
-            self.e.tick(now+3)
+            self.e.tick(time.time()+3)
         return self.store.db.execute("SELECT id,version,evidence_json FROM cases WHERE kind IN ('ssh_session_account','web_shell_account') ORDER BY created_at DESC LIMIT 1").fetchone()
     def apply(self,row,result):
         with patch.object(a.pwd,'getpwnam',side_effect=self.names):self.e.apply_analysis(*row,result)
