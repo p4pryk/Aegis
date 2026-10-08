@@ -8,7 +8,7 @@ class Line(str):
     def __new__(cls,text,level='neutral',segments=None):
         obj=super().__new__(cls,text);obj.level=level;obj.segments=segments;return obj
 
-COLORS={'neutral':'\x1b[0m','warning':'\x1b[33m','critical':'\x1b[31m','defended':'\x1b[94m'}
+COLORS={'healthy':'\x1b[32m','neutral':'\x1b[0m','warning':'\x1b[33m','critical':'\x1b[31m','defended':'\x1b[94m'}
 MARKERS={'neutral':'[i]','warning':'[!]','critical':'[x]','defended':'[<>]'}
 
 def painted(line):
@@ -99,6 +99,21 @@ def event_lines(data,width):
         lines.extend(wrapped(view['message'],width,view['level']));lines.append('')
     return lines or wrapped('Waiting for events.',width)
 
+def source_lines(data,width,now):
+    from monitoring import visible_sources
+    lines=wrapped('SOURCE HEALTH / checked every 5s / kernel audit probe every 30s',width)
+    lines+=wrapped('QUIET means the collector is alive, not that the source is disconnected.',width)
+    lines.append('-'*width)
+    for source in visible_sources(data,now):
+        status=source['status'];level='critical' if status in ('DOWN','STALE') else 'warning' if status in ('GAP','LAGGING','UNKNOWN') else 'healthy' if status in ('LIVE','QUIET') else 'neutral'
+        marker='[OK]' if status in ('LIVE','QUIET') else '[--]' if status=='DISABLED' else '[!!]'
+        lines.extend(wrapped(f"{marker} {source['name']:<18} {status}",width,level))
+        last=source.get('last_record_at');age=f"{max(0,now-last):.0f}s ago" if last else 'not seen in this collector session'
+        lines.extend(wrapped('     Last intake: '+age+' | Pending: '+str(source.get('pending',0))+' '+source.get('unit','records')+f" | Delay: {source.get('lag_seconds',0):.1f}s",width))
+        lines.extend(wrapped('     '+source.get('reason',''),width,level));lines.append('')
+    lines.extend(wrapped('Scope: selected journal streams, kernel audit and the trusted application log. Liveness does not prove that every application emits logs. Historical gaps remain warnings after recovery.',width))
+    return lines
+
 def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None,case_id=None,offset=0):
     width=max(1,width);height=max(1,height);now=time.time() if now is None else now
     if width<32 or height<12:
@@ -125,10 +140,14 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
     timing=data.get('latest_timing') or {}
     lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
+    from monitoring import visible_sources
+    sources=visible_sources(data,now)
+    source_warning=any(s['status'] in ('DOWN','STALE','GAP','LAGGING','UNKNOWN') for s in sources)
+    lines.append(Line(fit('Sources: '+' | '.join(s['name'].split()[0]+' '+s['status'] for s in sources)+'  [5] details',width),'warning' if source_warning else 'healthy'))
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
-    if mode=='chain':
-        body=chain_lines(data,width,case_id)
+    if mode in ('chain','sources'):
+        body=chain_lines(data,width,case_id) if mode=='chain' else source_lines(data,width,now)
         offset=min(max(0,offset),max(0,len(body)-body_rows))
         lines.extend((body[offset:offset+body_rows]+[' '*width]*body_rows)[:body_rows])
     elif mode=='both' and width>=100:
@@ -149,7 +168,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         lines.extend(([fit(title,width),'-'*width]+body+[' '*width]*body_rows)[:body_rows])
     lines=lines[:max(0,height-2)]
     lines+=[' '*width]*(max(0,height-2)-len(lines))
-    lines.append('-'*width);lines.append(fit('[1/2/3] views [4] chain [n/p] case [j/k] scroll [space] pause [q] quit',width))
+    lines.append('-'*width);lines.append(fit('[1/2/3] views [4] chain [5] sources [n/p] case [j/k] scroll [q] quit',width))
     return lines[:height]
 
 def read_snapshot(database,case_id=None):
@@ -174,16 +193,17 @@ def main():
     parser=argparse.ArgumentParser(description='AEGIS Defense Agent: live terminal interface')
     parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db');parser.add_argument('--snapshot',action='store_true');parser.add_argument('--data-file');parser.add_argument('--width',type=int);parser.add_argument('--height',type=int)
     parser.add_argument('--case',help='Keep a case selected; with --snapshot print its complete chain')
+    parser.add_argument('--sources',action='store_true',help='Show collector health and source coverage')
     args=parser.parse_args();data={};error=None
     try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,args.case)
     except (OSError,ValueError,sqlite3.Error):error=True
     size=shutil.get_terminal_size((104,32));width=args.width or size.columns;height=args.height or size.lines
     if args.snapshot or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        output=logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
+        output=logo(width)+source_lines(data,width,time.time()) if args.sources else logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
         print('\n'.join(line.rstrip() for line in output))
         return
     import termios,tty
-    original=termios.tcgetattr(sys.stdin);paused=False;mode='chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
+    original=termios.tcgetattr(sys.stdin);paused=False;mode='sources' if args.sources else 'chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
     def stop(signum,frame):raise KeyboardInterrupt
     old_signal=signal.signal(signal.SIGTERM,stop)
     try:
@@ -204,14 +224,14 @@ def main():
                 key=os.read(sys.stdin.fileno(),1)
                 if key in (b'q',b'Q',b'\x03',b'\x04'):break
                 if key==b' ':paused=not paused
-                if key in (b'1',b'2',b'3',b'4'):
-                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain'}[key];offset=0
+                if key in (b'1',b'2',b'3',b'4',b'5'):
+                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain',b'5':'sources'}[key];offset=0
                     if mode=='chain' and not selected:selected=next((c['id'] for c in data.get('cases',[])),None)
                 if mode=='chain' and key in (b'n',b'p'):
                     ids=[c['id'] for c in sorted(data.get('cases',[]),key=lambda c:c.get('updated_at',0),reverse=True)]
                     if ids:selected=ids[((ids.index(selected) if selected in ids else 0)+(1 if key==b'n' else -1))%len(ids)];offset=0
-                if mode=='chain' and key in (b'j',b'k'):
-                    offset=max(0,min(len(chain_lines(data,width,selected))-1,offset+(3 if key==b'j' else -3)))
+                if mode in ('chain','sources') and key in (b'j',b'k'):
+                    offset=max(0,min(len(chain_lines(data,width,selected) if mode=='chain' else source_lines(data,width,time.time()))-1,offset+(3 if key==b'j' else -3)))
             if not paused and time.monotonic()>=next_poll:
                 try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,selected);error=None
                 except (OSError,ValueError,sqlite3.Error):error=True

@@ -4,17 +4,22 @@ from vulnerable_app import rpc
 LOG='/var/log/defense-agent/application.jsonl'
 def ingest(engine):
     try:fd=os.open(engine.c.get('application_log',LOG),os.O_RDONLY|os.O_NOFOLLOW)
-    except FileNotFoundError:return
+    except FileNotFoundError:
+        engine.app_health=dict(getattr(engine,'app_health',{}),connected=False,checked_at=time.time());return
     with os.fdopen(fd) as f:
         fcntl.flock(f,fcntl.LOCK_SH)
         with engine.store.atomic():
             st=os.fstat(f.fileno())
             if st.st_uid!=0 or st.st_mode&0o022 or not stat.S_ISREG(st.st_mode):raise ValueError('Untrusted application telemetry')
-            off=engine.store.state('app_offset') or {};position=off.get('offset',0) if off.get('ino')==st.st_ino and off.get('offset',0)<=st.st_size else 0;f.seek(position)
+            h=getattr(engine,'app_health',{});engine.app_health=h
+            h.update(connected=True,checked_at=time.time())
+            off=engine.store.state('app_offset') or {}
+            if off and (off.get('ino')!=st.st_ino or off.get('offset',0)>st.st_size):engine.store.state('app_source_gap',{'time':time.time(),'reason':'file replaced or truncated; continuity cannot be proved'})
+            position=off.get('offset',0) if off.get('ino')==st.st_ino and off.get('offset',0)<=st.st_size else 0;f.seek(position)
             for _ in range(100):
                 line=f.readline()
                 if not line or not line.endswith('\n'):break
-                position=f.tell()
+                position=f.tell();h['last_received_at']=time.time()
                 try:
                     d=json.loads(line)
                     if d['type'] not in ('app_login','app_account_job','app_persistence_job') or d['boot_id']!=engine.boot_id or abs(time.time()-d['time'])>60:continue
@@ -22,7 +27,13 @@ def ingest(engine):
                     if engine.remember(event):
                         engine.store.observe('application', 'sql_auth_bypass' if d['type']=='app_login' and d['bypass'] else 'sqli_signature' if d['type']=='app_login' and d.get('suspicious') else d['type'],d['ip'],'Database authentication outcome recorded.' if d['type']=='app_login' else 'Application operation completed; awaiting independent audit correlation.',event['event_id'],d['time'])
                         if d['type']=='app_login' and (d['bypass'] or d.get('suspicious')):engine.create_or_append('app_sql_login',event['subject'],event)
-                except (ValueError,KeyError,TypeError):continue
+                except (ValueError,KeyError,TypeError):
+                    h['invalid_records']=h.get('invalid_records',0)+1
+                    engine.store.state('app_source_gap',{'time':time.time(),'reason':'invalid application record skipped'})
+                    continue
+            h['pending_bytes']=max(0,st.st_size-position)
+            h['pending_since']=h.get('pending_since') or time.time() if h['pending_bytes'] else None
+            h['pending_seconds']=time.time()-h['pending_since'] if h['pending_since'] else 0
             new_offset={'ino':st.st_ino,'offset':position}
             if off!=new_offset:engine.store.state('app_offset',new_offset)
     if time.monotonic()-getattr(engine,'last_app_enrichment',0)<.25:return

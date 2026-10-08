@@ -127,7 +127,7 @@ The training flow is `POST /login` with `{"username":"admin' --","password":"inc
 python3 -m unittest discover -s aegis/tests -q
 ```
 
-The current suite has **124 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. `aegis/live-telemetry-tests.py` opens real SSH sessions, performs an inert group/file-change sequence and checks session isolation, terminal explanations and restart retention. `aegis/live-prompt-tests.py` uses the real model against baseline and adversarial evidence with a recording executor, so it does not perform defensive side effects. Stop `defense-agent-ai` for that script and restart it afterwards; it reserves calls against the existing hourly budget and spacing without resetting counters. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+The current suite has **139 unit tests**. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. `aegis/live-telemetry-tests.py` opens real SSH sessions, performs an inert group/file-change sequence and checks session isolation, terminal explanations and restart retention. `aegis/live-prompt-tests.py` uses the real model against baseline and adversarial evidence with a recording executor, so it does not perform defensive side effects. Stop `defense-agent-ai` for that script and restart it afterwards; it reserves calls against the existing hourly budget and spacing without resetting counters. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period, and model starts are limited to at least eight seconds apart and 40 calls per hour by default. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, external alert delivery, sustained load testing beyond the bounded lab burst, and removal or stronger isolation of the privileged training broker.
 
@@ -144,7 +144,34 @@ sudo -u defense-ai python3 /opt/defense-agent/console.py --case CASE_ID --snapsh
 
 If `watch.sh` is run from the repository, use `sudo bash aegis/watch.sh` with the same arguments. The `--snapshot --case` combination prints the complete case rather than cropping it to terminal height. The view separates UTC event chronology and source/actor metadata, verified links, session attribution, contextual matches, unlinked evidence, the local response gate, model uncertainty/confidence and verified action results. A confidence score is not a calibrated probability. Inode mode/owner metadata describes the audit-time record, not a content diff or a guaranteed before/after comparison. Missing process identity and case capacity limits are shown explicitly.
 
+## Source health
+
+Press **5** or start the console with `--sources`. The fixed header includes a compact status summary; the detailed screen shows kernel audit, SSH journald, selected service journald and the bundled application's trusted JSONL source. Each row includes last intake, outstanding records/bytes, backlog delay and a reason. **j/k** scroll the details.
+
+| State | Meaning |
+| --- | --- |
+| `LIVE` | Collector is running and received input in the last 30 seconds. |
+| `QUIET` | Collector is running, with no recent input. Silence alone is not a failure. |
+| `DOWN` | Reader/producer is stopped, missing, or its input is unavailable. |
+| `LAGGING` | A backlog has been delayed for at least five seconds. |
+| `GAP` | Loss, invalid input or possible cursor/file continuity loss was recorded. |
+| `DISABLED` | Source is disabled by configuration. |
+| `STALE` | Core health is older than 15 seconds; last-known source status is not current. |
+| `UNKNOWN` | No source-health snapshot is available yet. |
+
+Health is sampled every five seconds; the kernel audit status probe runs every 30 seconds. Process checks include PID birth identity and detect a stopped process even when its pipe still exists. The application checks the HTTP service and broker as well as the file reader; application backlog delay is the duration of a nonempty byte backlog. Cursor/file gaps remain warnings after recovery, including core restarts. A running collector does not prove every service emits logs: this screen describes the configured sources, not all logs on the machine. It is local status only, without an external heartbeat or alerts.
+
+`aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
+
 ## Change log
+
+### 2026-10-08 — Per-source collection health in the terminal
+
+- Add a source-health screen (`5` / `--sources`) and an always-visible summary, with green live/quiet states, yellow backlog/gap warnings and red down/stale states. Display intake age, backlog and the reason for each status.
+- Check journal process identity/state, the audit producer and kernel audit status, and application reader/broker availability independently of log traffic. Persist audit intake timestamps and continuity warnings; stop presenting old source states as current when the core heartbeat expires.
+- Report missing application input, malformed application records and possible file replacement/truncation gaps. Keep detection and response permissions unchanged.
+- Validated on the Azure VM: **139 unit tests**, **11 live source-health checks** (including process suspension/recovery and stale core detection) and **17 application-defense regression checks** passed. Captured source-only terminal snapshots during normal operation and controlled interruption.
+
 
 ### 2026-10-08 — Terminal incident chains and host-change telemetry
 

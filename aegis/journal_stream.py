@@ -69,7 +69,9 @@ def reader(events, source, config, checkpoints, health):
         try:
             with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                   text=True, errors='replace') as process:
-                health['connected'] = True
+                from agent import process_snapshot
+                snapshot=process_snapshot(process.pid) or {}
+                health.update(pid=process.pid,start_ticks=snapshot.get('start_ticks'),connected=True)
                 for line in process.stdout:
                     try:
                         record = json.loads(line)

@@ -673,6 +673,9 @@ def serve_core(c):
     store=Store(c);engine=CorrelatedEngine(c,store,None);spool=Spool(c);meter=Meter()
     events=queue.Queue(maxsize=4096)
     checkpoints=Checkpoints(store)
+    previous=store.state('sensor_health') or {}
+    for key,target in (('journal',JOURNAL_HEALTH),('journal_context',JOURNAL_CONTEXT_HEALTH)):
+        target.update({k:v for k,v in previous.get(key,{}).items() if k in ('last_received_at','cursor_gap_at','invalid_records')})
     threading.Thread(target=reader,args=(events,'ssh',c,checkpoints,JOURNAL_HEALTH),daemon=True).start()
     threading.Thread(target=reader,args=(events,'journal_context',c,checkpoints,JOURNAL_CONTEXT_HEALTH),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
@@ -700,7 +703,9 @@ def serve_core(c):
                 from app_correlation import ingest
                 ingest(engine)
                 engine.enrich_app_cases()
-            except Exception as e:store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
+            except Exception as e:
+                engine.app_health=dict(getattr(engine,'app_health',{}),connected=False,checked_at=time.time())
+                store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
         engine.tick()
         meter.add(consumed,time.monotonic()-loop_start)
         if time.time()-last_health>5:
@@ -711,11 +716,18 @@ def serve_core(c):
                     status=run(['auditctl','-s']);audit_health={x.split()[0]:' '.join(x.split()[1:]) for x in status.splitlines() if x.split()}
                 except Exception as e:audit_health={'error':str(e)[:200]}
             with events.mutex:
+                pending_sources={}
+                for source,record in events.queue:
+                    try:age=max(0,last_health-int(record['__REALTIME_TIMESTAMP'])/1e6)
+                    except (KeyError,ValueError,TypeError):age=0
+                    count,oldest=pending_sources.get(source,(0,0));pending_sources[source]=(count+1,max(oldest,age))
                 first=events.queue[0][1] if events.queue else {}
                 try:journal_age=max(0,last_health-int(first['__REALTIME_TIMESTAMP'])/1e6)
                 except (KeyError,ValueError,TypeError):journal_age=0
             response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
             health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
+            from monitoring import source_states
+            health['sources']=source_states(engine,spool,{'ssh':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH)},pending_sources,last_health,audit_health)
             store.state('sensor_health',health)
             pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
         if consumed==0:time.sleep(.02)

@@ -49,6 +49,7 @@ class Spool:
                 self.db.execute('INSERT INTO inbox(received,boot,line,snapshots,bytes) VALUES (?,?,?,?,?)',
                                 (time.time(),boot,line,payload,size))
                 meta['bytes']+=size;meta['rows']+=1;meta['accepted']+=1;accepted.append(True)
+                self.db.execute("INSERT OR REPLACE INTO meta VALUES ('last_received_at',?)",(time.time(),))
             for key in ('bytes','rows','accepted','dropped'):
                 self.db.execute('UPDATE meta SET value=? WHERE key=?',(meta[key],key))
         return accepted
@@ -102,6 +103,10 @@ def forward(config, stream):
     from agent import process_snapshot
     boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     spool = Spool(config)
+    identity=process_snapshot(os.getpid()) or {}
+    identity['boot_id']=boot
+    marker=spool.path.parent/'producer.json'
+    temporary=marker.with_suffix('.tmp');temporary.write_text(json.dumps(identity));temporary.chmod(0o600);temporary.replace(marker)
     last_alert=0
     pending=b''
     try:

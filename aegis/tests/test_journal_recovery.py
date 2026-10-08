@@ -100,8 +100,8 @@ class JournalRecovery(unittest.TestCase):
         self.assertEqual(health['backpressure_count'], 1)
 
     def test_invalid_cursor_falls_back_with_visible_gap(self):
-        first = Mock(stdout=iter([]));first.wait.return_value = 1
-        second = Mock(stdout=iter([json.dumps(self.record)]));second.wait.return_value = 0
+        first = Mock(pid=999998,stdout=iter([]));first.wait.return_value = 1
+        second = Mock(pid=999999,stdout=iter([json.dumps(self.record)]));second.wait.return_value = 0
         first.__enter__ = Mock(return_value=first);first.__exit__ = Mock(return_value=False)
         second.__enter__ = Mock(return_value=second);second.__exit__ = Mock(return_value=False)
         checkpoints = Mock();checkpoints.cursor.return_value = 'removed-cursor'
