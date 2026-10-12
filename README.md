@@ -123,6 +123,31 @@ The installer creates `/etc/defense-agent/config.json` if it is absent. Before e
 
 The training flow is `POST /login` with `{"username":"admin' --","password":"incorrect"}`, followed by `POST /accounts` with the returned `session` and a `lab_http_*` user, or `POST /persistence` with that `session`, `"artifact":"cron"` and a fresh `name`. `POST /shell` exercises application process monitoring with a fixed harmless command. Synthetic valid credentials are shown at the target's `GET /` page. AEGIS itself has no web interface.
 
+## Manual rollback
+
+New executor actions produce a root-private receipt before changing the host and mark it reversible only after verifying the resulting state. The incident chain shows the receipt ID. Historical containment remains recorded; rollback is a separate administrative event and never changes the model verdict. The model and unprivileged console cannot invoke rollback.
+
+```bash
+sudo python3 /opt/defense-agent/rollback.py list
+sudo python3 /opt/defense-agent/rollback.py plan RECEIPT_ID
+sudo python3 /opt/defense-agent/rollback.py apply RECEIPT_ID --confirm PLAN_CONFIRMATION --reason "Reviewed false positive"
+```
+
+`plan` is read-only and prints the exact effect, original account settings or file metadata to restore, and a confirmation value. `apply` rechecks the state under the executor's shared lock, requires a reason, and records the root UID, optional sudo UID, reason, timestamps and outcome. A changed receipt requires a new plan. Repeated successful rollback is a no-op; interrupted or uncertain operations require manual review and are never automatically retried. There is no timed or model-triggered rollback.
+
+| Action | Manual rollback behavior |
+| --- | --- |
+| IP block | Remove only the element tagged with this receipt in the AEGIS set. An overlapping active claim or replacement element prevents removal. An already absent/expired block is a verified no-op. |
+| Account quarantine | Restore the original shell, account expiry and password-lock state for the same local account. Any later passwd/shadow database change, even for another user, requires manual review. Verification and restoration use the shadow-utils password lock; unrelated account records are preserved. Empty-password accounts are not eligible. |
+| File quarantine | Copy verified bytes back without overwriting any existing file or symlink; restore owner/group/mode and retain the quarantine evidence. A modified backup or another containment claim prevents restoration. |
+| Terminated process/SSH session or revoked application token | Irreversible: create a new legitimate session through normal authentication. |
+
+Restoring a cron file can immediately re-enable its scheduled behavior; the plan explicitly warns about this. Restored systemd files remain disabled/stopped and require a separate administrator decision to activate them. Account rollback does not resurrect killed processes or sessions. Plans from a previous boot, legacy actions without receipts and incomplete forward actions require manual review. This conservative workflow is tested on the isolated Ubuntu VM, not a general restore facility for directory-managed accounts or arbitrary Linux files.
+
+Receipts live in `/var/lib/defense-agent/rollback` (directory `0700`, files `0600`). They contain hashes and metadata, not stored password hashes or raw shadow records. They retain refusal/interruption history independently of incident retention; automatic deletion is intentionally absent. Keep them with the quarantined evidence for administrative review. The read-only incident screen shows the original containment receipt; use `rollback.py list` for its current rollback state.
+
+Run `sudo python3 aegis/live-rollback-tests.py` only on the isolated VM after installation. It uses temporary users, inert cron/systemd files and a private network namespace, verifies real traffic blocking/restoration, injects an interrupted account restore and cleans up active test artifacts. Receipts and quarantine evidence remain for review.
+
 ## Test and operational limits
 
 ```bash
@@ -170,6 +195,13 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-12 — Explicit, conflict-checked rollback
+
+- Record private, durable executor receipts and expose their IDs in incident chains. Add root-only list/plan/apply commands with a required reason and confirmation of the reviewed plan.
+- Restore scoped account restrictions and quarantined files, and remove only receipt-owned IP blocks. Refuse changed identities, occupied paths, modified backups, overlapping claims and previous-boot receipts. Retain evidence and administrative history; never revive terminated sessions or revoked tokens.
+- Treat interrupted rollback as requiring manual review; preserve historical containment results and make completed rollback idempotent.
+- Validated on the Azure VM: **169 unit tests**, **26 live rollback checks**, **four final plan/IPv4-mapped/IPv6 checks**, and **34 existing application/persistence defense checks** passed. Injected failure between account-file replacements preserved password/expiry containment and required manual review. Verified unprivileged denial, changed/recreated accounts, occupied destinations, tampered backups, overlapping IP claims, real traffic restoration, exact metadata plans and installed source hashes.
 
 ### 2026-10-12 — Bounded model queue and explicit demo installation
 

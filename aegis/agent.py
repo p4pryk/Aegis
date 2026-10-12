@@ -67,7 +67,7 @@ class Executor:
 """
             p=subprocess.run(['nft','-f','-'],input=rules,text=True,capture_output=True)
             if p.returncode: raise RuntimeError(p.stderr)
-    def execute(self, request):
+    def execute(self, request, undo_token=None):
         if request.get('action') == 'quarantine_persistence':
             from persistence import quarantine
             return quarantine(request)
@@ -86,7 +86,9 @@ class Executor:
             family='blocked4' if ipaddress.ip_address(ip).version==4 else 'blocked6'
             # add is idempotent while present; don't reset expiry on repeated incident.
             present=subprocess.run(['nft','get','element','inet','defense_lab',family,'{',ip,'}'],capture_output=True).returncode==0
-            if not present: run(['nft','add','element','inet','defense_lab',family,'{',ip,'timeout',f'{ttl}s','}'])
+            if not present:
+                comment=['comment','"aegis-undo-'+undo_token+'"'] if undo_token else []
+                run(['nft','add','element','inet','defense_lab',family,'{',ip,'timeout',f'{ttl}s',*comment,'}'])
             run(['nft','get','element','inet','defense_lab',family,'{',ip,'}'])
             return dict(verified=True,ip=ip,ttl=ttl,already_present=present)
         if request.get('action') == 'terminate_session':
@@ -648,12 +650,14 @@ def receive(s):
     return data
 
 def serve_executor(c):
+    from rollback import Journal
+    journal=Journal(c)
     executor=Executor(c);executor.firewall_init();s=credential_socket(c['executor_socket'],socket.SOCK_SEQPACKET);s.listen(8)
     while True:
         client,_=s.accept()
         with client:
             client.settimeout(3)
-            try:result=executor.execute(json.loads(receive(client)));reply={'ok':True,'result':result}
+            try:result=journal.record(executor,json.loads(receive(client)));reply={'ok':True,'result':result}
             except Exception as e:reply={'ok':False,'error':str(e)[:500]}
             try:client.send(json.dumps(reply).encode())
             except OSError:pass  # The caller may restart after the action already completed.

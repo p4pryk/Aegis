@@ -67,4 +67,7 @@ def timeline(case):
         if not isinstance(action,dict):continue
         from presentation import action_display
         view=action_display(action);lines.append((view['message']+' / '+view['label'],view['level']))
+        result=action.get('result',{})
+        if result.get('undo_receipt'):
+            lines.append(('Rollback receipt: '+str(result['undo_receipt'])+' / '+('manual plan available' if result.get('undo_available') else 'manual review / irreversible'),'neutral'))
     return lines
