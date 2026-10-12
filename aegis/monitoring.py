@@ -91,3 +91,26 @@ def visible_sources(data,now):
     if not sources:return [dict(name=name,status='UNKNOWN',reason='Waiting for source health',pending=0,unit='records',lag_seconds=0,last_record_at=None) for name in ('Kernel audit','SSH journal','Service journal','Application')]
     stale=not 0<=now-health.get('time',0)<15
     return [dict(source,status='STALE',reason='Core health expired; collector state is unknown') if stale else dict(source) for source in sources]
+
+
+def model_health(directory,now=None):
+    """Read bounded worker diagnostics; never use them to authorize a response."""
+    import json,pathlib,math,os,stat
+    now=time.time() if now is None else now
+    try:
+        fd=os.open(pathlib.Path(directory)/'heartbeat.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd) as stream:
+            info=os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size>16384:raise ValueError('invalid heartbeat file')
+            data=json.loads(stream.read(16385))
+        stamp=data['time']
+        if type(stamp) not in (int,float) or not 0<=now-stamp<45:raise ValueError('stale')
+        statuses=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE')
+        if data['status'] not in statuses:raise ValueError('unknown state')
+        result={'time':stamp,'status':data['status']}
+        for key in ('pending','oldest_seconds','hourly_calls','cap','reserve','budget_resets_at','unavailable_until'):
+            value=data.get(key,0)
+            if type(value) not in (int,float) or not math.isfinite(value) or value<0:raise ValueError('invalid counter')
+            result[key]=value
+        return result
+    except (OSError,ValueError,TypeError,KeyError):return {'time':now,'status':'MODEL UNAVAILABLE'}

@@ -144,6 +144,8 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') else ''
     lines.append(fit(f"Audit + journal: {health.get('records_per_second',0)} records/s | Audit pending: {spool.get('rows','--')} | Oldest: {spool.get('oldest_seconds',0):.1f}s | Lost: {spool.get('dropped','--')}"+warning,width))
     lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
+    model=data.get('model_health',{});model_status=model.get('status','MODEL UNAVAILABLE') if 0<=now-model.get('time',0)<45 else 'MODEL UNAVAILABLE'
+    lines.append(Line(fit(f"Model: {model_status} | Pending: {model.get('pending','--')} | Oldest: {model.get('oldest_seconds',0):.0f}s | Calls: {model.get('hourly_calls','--')}/{model.get('cap','--')} | Reserve: {model.get('reserve','--')}",width),'neutral' if model_status in ('IDLE','ANALYZING') else 'warning'))
     timing=data.get('latest_timing') or {}
     lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
     from monitoring import visible_sources
@@ -189,7 +191,7 @@ def read_snapshot(database,case_id=None):
             cases.extend(dict(r) for r in conn.execute('SELECT * FROM cases WHERE id=?',(case_id,)))
         events=[dict(r) for r in conn.execute('SELECT * FROM observations ORDER BY rowid DESC LIMIT 60')]
         metrics=[dict(r) for r in conn.execute('SELECT * FROM sensor_metrics')]
-        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker')")}
+        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker','model_health')")}
         timing=conn.execute('SELECT t.* FROM case_timings t JOIN cases c ON c.id=t.case_id ORDER BY c.updated_at DESC LIMIT 1').fetchone()
         states['latest_timing']=dict(timing) if timing else {}
         return {'cases':cases,'observations':events,'metrics':metrics,**states}

@@ -43,10 +43,11 @@ def ssh(user,key,command,background=False):
  return cmd(args,False)
 
 def failures(user):
- codes=[ssh(user,tmp/'wrong','true').returncode for _ in range(5)];time.sleep(.5)
- r=query("SELECT details_json FROM correlation_events WHERE kind='ssh_failure' AND event_time>=?",(started,))
- count=sum(json.loads(x['details_json']).get('user')==user for x in r)
- if count<5:raise RuntimeError('Expected 5 real failed key authentications; got '+str(count))
+ codes=[ssh(user,tmp/'wrong','true').returncode for _ in range(5)]
+ def received():
+  rows=query("SELECT details_json FROM correlation_events WHERE kind='ssh_failure' AND event_time>=?",(started,))
+  return sum(json.loads(x['details_json']).get('user')==user for x in rows)
+ if not wait(lambda:received()>=5,10):raise RuntimeError('Expected 5 real failed key authentications; got '+str(received()))
  return codes
 
 def configure(dedicated):
@@ -78,7 +79,7 @@ try:
  cmd(['ip','netns','add',ns]);cmd(['ip','link','add',host,'type','veth','peer','name',peer]);cmd(['ip','link','set',peer,'netns',ns]);cmd(['ip','addr','add',dst+'/30','dev',host]);cmd(['ip','link','set',host,'up']);cmd(['ip','netns','exec',ns,'ip','addr','add',ip+'/30','dev',peer]);cmd(['ip','netns','exec',ns,'ip','link','set',peer,'up']);cmd(['ip','netns','exec',ns,'ip','link','set','lo','up'])
  if '--dedicated-only' not in sys.argv:
   failures(a);time.sleep(3)
-  r=query("SELECT * FROM cases WHERE kind='ssh_threshold' AND subject=? AND created_at>=? ORDER BY created_at DESC LIMIT 1",(ip,started));c=r[0] if r else None
+  r=query("SELECT * FROM cases WHERE kind='ssh_threshold' AND subject=? AND updated_at>=? ORDER BY updated_at DESC LIMIT 1",(ip,started));c=r[0] if r else None
   record('failed_logins_only_no_response',c and not json.loads(c['evidence_json']).get('allowed_actions') and cmd(['nft','get','element','inet','defense_lab','blocked4','{',ip,'}'],False).returncode!=0,case=c)
   normal=ssh(a,tmp/'good','sleep 120',True);wait(lambda:session_alive(a));time.sleep(3)
   record('failures_then_legal_login_stays_connected',normal.poll() is None and bool(session_alive(a)))

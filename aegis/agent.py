@@ -613,6 +613,11 @@ class CorrelatedEngine:
             if now-updated>=self.c.get('correlation_quiet_seconds',2) or now-created>=self.c.get('correlation_max_seconds',5):
                 evidence=canonical(self.snapshot(identifier,kind,subject,version));self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,identifier));self.status(identifier,'awaiting_analysis',{'version':version,'snapshot_hash':hashlib.sha256(evidence.encode()).hexdigest()})
         for identifier,version,evidence,updated in self.db.execute("SELECT id,version,evidence_json,updated_at FROM cases WHERE status='awaiting_analysis'").fetchall():
+            if now-updated>self.c.get('analysis_timeout_seconds',90):
+                from monitoring import model_health
+                reason=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),now)['status']
+                self.status(identifier,'analysis_error',{'error':'analysis deadline exceeded ('+reason+'); manual review required; no defense performed'})
+                continue
             path=pathlib.Path(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'))/f'{identifier}-v{version}.json'
             try:
                 fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
@@ -624,7 +629,7 @@ class CorrelatedEngine:
                     result=json.load(f)
                 self.apply_analysis(identifier,version,evidence,result)
             except FileNotFoundError:
-                if now-updated>self.c.get('analysis_timeout_seconds',45):self.status(identifier,'analysis_error',{'error':'model analysis timeout; no defense performed'})
+                pass
             except (OSError,ValueError,TypeError) as e:self.status(identifier,'analysis_error',{'error':str(e)[:300]})
         if now-self.last_cleanup>30:
             self.last_cleanup=now;self.db.execute('DELETE FROM correlation_events WHERE event_time<?',(now-600,));self.db.execute('DELETE FROM ssh_sessions WHERE event_time<?',(now-86400,));self.db.execute('DELETE FROM correlation_events WHERE rowid NOT IN (SELECT rowid FROM correlation_events ORDER BY event_time DESC LIMIT 20000)');self.db.commit()
@@ -726,7 +731,8 @@ def serve_core(c):
                 except (KeyError,ValueError,TypeError):journal_age=0
             response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
             health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
-            from monitoring import source_states
+            from monitoring import source_states,model_health
+            store.state('model_health',model_health(c.get('ai_results_dir','/var/lib/defense-agent-ai'),last_health))
             health['sources']=source_states(engine,spool,{'ssh':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH)},pending_sources,last_health,audit_health)
             store.state('sensor_health',health)
             pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))

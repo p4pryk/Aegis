@@ -27,6 +27,15 @@ class Operations(unittest.TestCase):
         self.engine=agent.CorrelatedEngine(self.c,self.store,None)
         self.spool=audit_spool.Spool(self.c);self.addCleanup(self.spool.db.close)
 
+    def test_expired_analysis_never_consumes_late_result(self):
+        identifier=self.case('deadline',status='awaiting_analysis',age=100)
+        row=self.store.db.execute('SELECT version FROM cases WHERE id=?',(identifier,)).fetchone()
+        pathlib.Path(self.c['ai_results_dir'],f'{identifier}-v{row[0]}.json').write_text('{}')
+        with patch.object(self.engine,'apply_analysis') as apply:
+            self.engine.tick()
+        apply.assert_not_called()
+        self.assertEqual(self.store.db.execute('SELECT status FROM cases WHERE id=?',(identifier,)).fetchone()[0],'analysis_error')
+
     def line(self,serial=1):
         return f'type=SYSCALL msg=audit({time.time()}:{serial}): success=yes pid=999999 ppid=999998 uid=0 auid=1000 ses=4 exe="/usr/bin/true" key="lab_root_exec"'
 

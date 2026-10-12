@@ -68,35 +68,78 @@ def analyze(row,cfg):
     if not isinstance(parsed.get('evidence_ids'),list) or not isinstance(parsed.get('proposed_actions'),list):raise ValueError('Invalid evidence/actions')
     return {'case_id':row['id'],'version':row['version'],'snapshot_hash':evidence_hash,'model':cfg['deployment'],'status':'complete','analysis':parsed,'seconds':round(time.time()-started,3),'started_at':started,'completed_at':time.time(),'usage':result.get('usage',{})}
 
-def main():
-    cfg=json.loads(pathlib.Path(CONFIG).read_text());OUT.mkdir(exist_ok=True)
-    while True:
+def limits(cfg):
+    cap=cfg.get('max_calls_per_hour',40)
+    if type(cap) is not int or cap<1:raise ValueError('Invalid model budget configuration')
+    reserve=cfg.get('response_reserve_calls',min(10,cap//4))
+    spacing=cfg.get('min_call_interval_seconds',8)
+    if type(cap) is not int or cap<1 or type(reserve) is not int or not 0<=reserve<cap or type(spacing) not in (int,float) or not 1<=spacing<=3600:
+        raise ValueError('Invalid model budget configuration')
+    return cap,reserve,spacing
+
+def wait_reason(row,state,cfg,now):
+    cap,reserve,spacing=limits(cfg)
+    urgent=bool(json.loads(row['evidence_json']).get('allowed_actions'))
+    if state['calls']>=cap:return 'BUDGET EXHAUSTED'
+    if not urgent and state['calls']>=cap-reserve:return 'RESPONSE BUDGET RESERVED'
+    if now<state.get('unavailable_until',0):return 'MODEL UNAVAILABLE'
+    key=row['id']+'-v'+str(row['version'])
+    if now<state['attempts'].get(key,{}).get('next',0):return 'MODEL UNAVAILABLE'
+    return 'WAITING FOR MODEL' if now<state.get('last_call_at',0)+spacing else 'READY'
+
+def cycle(cfg):
+    cap,reserve,_=limits(cfg);now=time.time();statepath=OUT/'correlation-worker-state.json'
+    state=json.loads(statepath.read_text()) if statepath.exists() else {'hour':int(now//3600),'calls':0,'attempts':{}}
+    if state['hour']!=int(now//3600):state.update(hour=int(now//3600),calls=0)
+    conn=sqlite3.connect('file:'+DB+'?mode=ro',uri=True,timeout=2);conn.row_factory=sqlite3.Row
+    try:rows=conn.execute("SELECT * FROM cases WHERE status='awaiting_analysis' ORDER BY CASE WHEN json_array_length(evidence_json,'$.allowed_actions')>0 THEN 0 ELSE 1 END, updated_at LIMIT 256").fetchall()
+    finally:conn.close()
+    keys={row['id']+'-v'+str(row['version']) for row in rows}
+    state['attempts']={k:v for k,v in state['attempts'].items() if k in keys}
+    pending=[]
+    for row in rows:
+        p=OUT/(row['id']+'-v'+str(row['version'])+'.json')
+        if p.exists():continue
+        if json.loads(row['evidence_json']).get('policy',{}).get('actor_authorization')=='approved':
+            write(p,local_authorized_analysis(row));continue
+        pending.append(row)
+    reasons=[wait_reason(row,state,cfg,now) for row in pending]
+    selected=next((row for row,reason in zip(pending,reasons) if reason=='READY'),None)
+    health={'time':now,'status':'ANALYZING' if selected else reasons[0] if reasons else 'IDLE',
+            'pending':len(pending),'oldest_seconds':round(max((now-r['updated_at'] for r in pending),default=0),1),
+            'hourly_calls':state['calls'],'cap':cap,'reserve':reserve,'budget_resets_at':(int(now//3600)+1)*3600,
+            'unavailable_until':state.get('unavailable_until',0)}
+    write(OUT/'heartbeat.json',health)
+    if selected:
+        row=selected;key=row['id']+'-v'+str(row['version']);p=OUT/(key+'.json')
+        attempt=state['attempts'].get(key,{'n':0,'next':0})
+        state['last_call_at']=now;state['calls']+=1;attempt['n']+=1
+        attempt['next']=now+min(120,5*2**min(attempt['n'],4));state['attempts'][key]=attempt
+        write(statepath,state)  # Reserve cost before any external call, including failed attempts.
         try:
-            conn=sqlite3.connect('file:'+DB+'?mode=ro',uri=True,timeout=2);conn.row_factory=sqlite3.Row
-            rows=conn.execute("SELECT * FROM cases WHERE status='awaiting_analysis' ORDER BY CASE WHEN json_array_length(evidence_json,'$.allowed_actions')>0 THEN 0 ELSE 1 END, created_at LIMIT 100").fetchall();conn.close()
-            now=time.time();statepath=OUT/'correlation-worker-state.json'
-            state=json.loads(statepath.read_text()) if statepath.exists() else {'hour':int(now//3600),'calls':0,'attempts':{}}
-            if state['hour']!=int(now//3600):state={'hour':int(now//3600),'calls':0,'attempts':{}}
-            for row in rows:
-                key=row['id']+'-v'+str(row['version']);p=OUT/(key+'.json')
-                if p.exists():continue
-                if json.loads(row['evidence_json']).get('policy',{}).get('actor_authorization')=='approved':
-                    write(p,local_authorized_analysis(row));continue
-                attempt=state['attempts'].get(key,{'n':0,'next':0})
-                if attempt['next']>now or state['calls']>=cfg.get('max_calls_per_hour',20) or time.time()<state.get('last_call_at',0)+cfg.get('min_call_interval_seconds',8):continue
-                state['last_call_at']=time.time();state['calls']+=1;attempt['n']+=1;attempt['next']=now+min(120,5*2**min(attempt['n'],4));state['attempts'][key]=attempt;write(statepath,state)
-                try:
-                    write(p,analyze(row,cfg));print(json.dumps({'analysis_ready':row['id'],'version':row['version']}),flush=True)
-                except Exception as exc:
-                    print(json.dumps({'analysis_retry':row['id'],'error':type(exc).__name__,'http_status':getattr(exc,'code',None)}),flush=True)
-                    write(OUT/'health.json',{'time':time.time(),'status':'retry','error':type(exc).__name__,'http_status':getattr(exc,'code',None)})
-                    if getattr(exc,'code',None)==429:
-                        retry=exc.headers.get('Retry-After','10')
-                        try:attempt['next']=time.time()+min(60,max(5,float(retry)))
-                        except ValueError:attempt['next']=time.time()+10
-                        write(statepath,state)
-                    if attempt['n']>=3:write(p,{'case_id':row['id'],'version':row['version'],'snapshot_hash':hashlib.sha256(row['evidence_json'].encode()).hexdigest(),'status':'failed','completed_at':time.time(),'error':type(exc).__name__})
-            write(OUT/'heartbeat.json',{'time':time.time(),'hourly_calls':state['calls'],'cap':cfg.get('max_calls_per_hour',20)})
+            write(p,analyze(row,cfg));state['unavailable_until']=0
+            print(json.dumps({'analysis_ready':row['id'],'version':row['version']}),flush=True)
+        except Exception as exc:
+            code=getattr(exc,'code',None);delay=10
+            if code==429:
+                from email.utils import parsedate_to_datetime
+                retry=exc.headers.get('Retry-After','10')
+                try:delay=max(1,int(retry))
+                except ValueError:
+                    try:delay=max(1,parsedate_to_datetime(retry).timestamp()-time.time())
+                    except (ValueError,TypeError,OverflowError):delay=10
+            state['unavailable_until']=time.time()+delay
+            attempt['next']=max(attempt['next'],state['unavailable_until'])
+            health.update(time=time.time(),status='MODEL UNAVAILABLE',http_status=code,unavailable_until=state['unavailable_until'])
+            write(OUT/'heartbeat.json',health)
+            print(json.dumps({'analysis_retry':row['id'],'error':type(exc).__name__,'http_status':code}),flush=True)
+            if attempt['n']>=3:write(p,{'case_id':row['id'],'version':row['version'],'snapshot_hash':hashlib.sha256(row['evidence_json'].encode()).hexdigest(),'status':'failed','completed_at':time.time(),'error':type(exc).__name__})
+    write(statepath,state)
+
+def main():
+    cfg=json.loads(pathlib.Path(CONFIG).read_text());limits(cfg);OUT.mkdir(exist_ok=True)
+    while True:
+        try:cycle(cfg)
         except Exception as exc:print(json.dumps({'ai_loop_error':type(exc).__name__}),flush=True)
         time.sleep(.5)
 if __name__=='__main__':main()
