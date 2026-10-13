@@ -107,7 +107,19 @@ class Journal:
             s=os.fstat(f.fileno())
             if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.geteuid() or s.st_mode&0o077 or s.st_size>131072:raise ValueError('Unsafe receipt')
             return json.load(f)
-    def save(self,r):atomic(self.path(r['id']),encoded(r).encode())
+    def publish(self,r):
+        from response_view import public_receipt
+        root=self.root.parent/'response-history'
+        root.mkdir(mode=0o755,exist_ok=True)
+        info=root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o022:raise ValueError('Unsafe public history directory')
+        root.chmod(0o755)  # Service umask must not hide the public projection from the viewer.
+        public=public_receipt(r);path=root/(r['id']+'.json')
+        atomic(path,encoded(public).encode(),0o644)
+        os.utime(path,(public['updated_at'],public['updated_at']),follow_symlinks=False)
+    def save(self,r):
+        atomic(self.path(r['id']),encoded(r).encode())
+        self.publish(r)
     def entries(self):return [self.read(p.stem) for p in sorted(self.root.glob('*.json'))]
     def record(self,executor,request):
         with self.lock():

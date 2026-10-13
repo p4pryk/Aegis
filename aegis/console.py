@@ -99,8 +99,8 @@ def event_lines(data,width):
         lines.extend(wrapped(view['message'],width,view['level']));lines.append('')
     return lines or wrapped('Waiting for events.',width)
 
-def source_heading(width):
-    return ["="*width,Line(fit("SOURCE HEALTH".center(width),width)),"-"*width]
+def source_heading(width,title="SOURCE HEALTH"):
+    return ["="*width,Line(fit(title.center(width),width)),"-"*width]
 
 def source_lines(data,width,now):
     from monitoring import visible_sources
@@ -124,7 +124,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         compact=[fit('[<>] AEGIS / DEFENSE AGENT',width),fit('Enlarge the terminal window.',width)]
         return (compact+[' '*width]*height)[:max(0,height-1)]+[fit('[q] quit',width)]
     lines=logo(width)
-    if mode=='sources':lines.extend(source_heading(width))
+    if mode in ('sources','responses','review'):lines.extend(source_heading(width,{'sources':'SOURCE HEALTH','responses':'RESPONSE HISTORY','review':'REVIEW REQUIRED'}[mode]))
     else:lines.append('='*width)
     heartbeat=data.get('heartbeat',{});healthy=0<=now-heartbeat.get('time',0)<15
     status='DATA UNAVAILABLE' if error else 'DISPLAY PAUSED' if paused else 'AGENT ONLINE' if healthy else 'CHECK AGENT'
@@ -152,10 +152,18 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     sources=visible_sources(data,now)
     source_warning=any(s['status'] in ('DOWN','STALE','GAP','LAGGING','UNKNOWN') for s in sources)
     lines.append(Line(fit('Sources: '+' | '.join(s['name'].split()[0]+' '+s['status'] for s in sources)+'  [5] details',width),'warning' if source_warning else 'healthy'))
+    if mode in ('responses','review'):
+        rows=data.get('responses',[])
+        attention=sum(r.get('state') in ('prepared','forward_uncertain','undo_running','undo_uncertain') or (r.get('last_state')=='refused' and r.get('state')!='restored') for r in rows)+len(data.get('review_cases',[]))
+        lines=lines[:len(logo(width))+4]
+        lines.append(fit(f"Receipts loaded: {len(rows)} | Review items: {attention} | History: {data.get('response_history_status','UNAVAILABLE')}",width))
+        lines.append(Line(fit('Recorded outcomes / not a live host-state check / read-only',width),'warning'))
+        lines.append('-'*width)
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
-    if mode in ('chain','sources'):
-        body=chain_lines(data,width,case_id) if mode=='chain' else source_lines(data,width,now)
+    if mode in ('chain','sources','responses','review'):
+        from response_view import history_lines
+        body=chain_lines(data,width,case_id) if mode=='chain' else source_lines(data,width,now) if mode=='sources' else history_lines(data,width,mode=='review')
         offset=min(max(0,offset),max(0,len(body)-body_rows))
         lines.extend((body[offset:offset+body_rows]+[' '*width]*body_rows)[:body_rows])
     elif mode=='both' and width>=100:
@@ -176,7 +184,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         lines.extend(([fit(title,width),'-'*width]+body+[' '*width]*body_rows)[:body_rows])
     lines=lines[:max(0,height-2)]
     lines+=[' '*width]*(max(0,height-2)-len(lines))
-    lines.append('-'*width);lines.append(fit('[1/2/3] views [4] chain [5] sources [n/p] case [j/k] scroll [q] quit',width))
+    lines.append('-'*width);lines.append(fit('[1-3] views [4] chain [5] sources [6] responses [7] review [j/k] scroll [q] quit',width))
     return lines[:height]
 
 def read_snapshot(database,case_id=None):
@@ -194,7 +202,10 @@ def read_snapshot(database,case_id=None):
         states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker','model_health')")}
         timing=conn.execute('SELECT t.* FROM case_timings t JOIN cases c ON c.id=t.case_id ORDER BY c.updated_at DESC LIMIT 1').fetchone()
         states['latest_timing']=dict(timing) if timing else {}
-        return {'cases':cases,'observations':events,'metrics':metrics,**states}
+        from response_view import read_receipts
+        reviews=[dict(r) for r in conn.execute("SELECT c.*, (SELECT details_json FROM case_status_history h WHERE h.case_id=c.id AND h.status=c.status ORDER BY h.time DESC LIMIT 1) AS review_details FROM cases c WHERE status IN ('analysis_error','defense_error') ORDER BY updated_at DESC LIMIT 201")]
+        steps=[dict(r) for r in conn.execute('SELECT s.* FROM response_steps s JOIN cases c ON c.id=s.case_id ORDER BY c.updated_at DESC,s.position LIMIT 201')]
+        return {'response_steps':steps[:200],'response_steps_more':len(steps)>200,'cases':cases,'observations':events,'metrics':metrics,'review_cases':reviews[:200],'review_more':len(reviews)>200,**states,**read_receipts(database)}
     finally:conn.close()
 
 def main():
@@ -202,16 +213,22 @@ def main():
     parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db');parser.add_argument('--snapshot',action='store_true');parser.add_argument('--data-file');parser.add_argument('--width',type=int);parser.add_argument('--height',type=int)
     parser.add_argument('--case',help='Keep a case selected; with --snapshot print its complete chain')
     parser.add_argument('--sources',action='store_true',help='Show collector health and source coverage')
+    parser.add_argument('--responses',action='store_true',help='Show recorded response and rollback history')
+    parser.add_argument('--review',action='store_true',help='Show incidents and actions requiring manual review')
     args=parser.parse_args();data={};error=None
     try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,args.case)
     except (OSError,ValueError,sqlite3.Error):error=True
     size=shutil.get_terminal_size((104,32));width=args.width or size.columns;height=args.height or size.lines
     if args.snapshot or not (sys.stdin.isatty() and sys.stdout.isatty()):
         output=logo(width)+source_heading(width)+source_lines(data,width,time.time()) if args.sources else logo(width)+chain_lines(data,width,args.case) if args.case else render(data,width,height,error=error)
+        if args.responses or args.review:
+            from response_view import history_lines
+            output=logo(width)+source_heading(width,'REVIEW REQUIRED' if args.review else 'RESPONSE HISTORY')+history_lines(data,width,args.review)
+            if error:output+=wrapped('Event store unavailable; review coverage is incomplete.',width,'critical')
         print('\n'.join(line.rstrip() for line in output))
         return
     import termios,tty
-    original=termios.tcgetattr(sys.stdin);paused=False;mode='sources' if args.sources else 'chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
+    original=termios.tcgetattr(sys.stdin);paused=False;mode='review' if args.review else 'responses' if args.responses else 'sources' if args.sources else 'chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
     def stop(signum,frame):raise KeyboardInterrupt
     old_signal=signal.signal(signal.SIGTERM,stop)
     try:
@@ -232,14 +249,16 @@ def main():
                 key=os.read(sys.stdin.fileno(),1)
                 if key in (b'q',b'Q',b'\x03',b'\x04'):break
                 if key==b' ':paused=not paused
-                if key in (b'1',b'2',b'3',b'4',b'5'):
-                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain',b'5':'sources'}[key];offset=0
+                if key in (b'1',b'2',b'3',b'4',b'5',b'6',b'7'):
+                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain',b'5':'sources',b'6':'responses',b'7':'review'}[key];offset=0
                     if mode=='chain' and not selected:selected=next((c['id'] for c in data.get('cases',[])),None)
                 if mode=='chain' and key in (b'n',b'p'):
                     ids=[c['id'] for c in sorted(data.get('cases',[]),key=lambda c:c.get('updated_at',0),reverse=True)]
                     if ids:selected=ids[((ids.index(selected) if selected in ids else 0)+(1 if key==b'n' else -1))%len(ids)];offset=0
-                if mode in ('chain','sources') and key in (b'j',b'k'):
-                    offset=max(0,min(len(chain_lines(data,width,selected) if mode=='chain' else source_lines(data,width,time.time()))-1,offset+(3 if key==b'j' else -3)))
+                if mode in ('chain','sources','responses','review') and key in (b'j',b'k'):
+                    from response_view import history_lines
+                    body=chain_lines(data,width,selected) if mode=='chain' else source_lines(data,width,time.time()) if mode=='sources' else history_lines(data,width,mode=='review')
+                    offset=max(0,min(len(body)-1,offset+(3 if key==b'j' else -3)))
             if not paused and time.monotonic()>=next_poll:
                 try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,selected);error=None
                 except (OSError,ValueError,sqlite3.Error):error=True

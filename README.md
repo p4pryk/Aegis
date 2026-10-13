@@ -123,6 +123,16 @@ The installer creates `/etc/defense-agent/config.json` if it is absent. Before e
 
 The training flow is `POST /login` with `{"username":"admin' --","password":"incorrect"}`, followed by `POST /accounts` with the returned `session` and a `lab_http_*` user, or `POST /persistence` with that `session`, `"artifact":"cron"` and a fresh `name`. `POST /shell` exercises application process monitoring with a fixed harmless command. Synthetic valid credentials are shown at the target's `GET /` page. AEGIS itself has no web interface.
 
+## Response history and manual review
+
+Press **6** for **RESPONSE HISTORY** or **7** for **REVIEW REQUIRED**. Both screens keep the shields, title and separators fixed while **j/k** scroll the records. Start directly with `watch.sh --responses` or `watch.sh --review`; add `--snapshot` for the full text report.
+
+Response history lists recorded containment and rollback outcomes, receipt IDs, available case links and durable response steps (including legacy actions without receipts). **CONTAINED** and **RESTORED** describe the recorded outcome, not a fresh verification of the host. The viewer does not infer IP expiry or recheck firewall/account state. Root still has to generate and approve an explicit rollback plan.
+
+Review required includes analysis failures/timeouts, failed responses, incomplete execution/rollback and refused rollback attempts. Each row shows the reason, available evidence counts and a next step. A completed rollback removes its receipt from the review list; incident errors remain visible while their recorded case status is an error. The screen does not acknowledge, retry, undo or change incident verdicts.
+
+The console reads up to 200 recent public receipts, 200 response steps and 200 failed cases independently of the normal 40-case window; truncation and unavailable history are explicit warnings. Older entries remain in the database/root ledger. Root publishes only action, allowed target, timestamps, receipt state and refusal diagnostics to `response-history/`; account fingerprints, restore snapshots, session tokens and operator reasons remain private. Existing receipts are projected when the executor starts.
+
 ## Manual rollback
 
 New executor actions produce a root-private receipt before changing the host and mark it reversible only after verifying the resulting state. The incident chain shows the receipt ID. Historical containment remains recorded; rollback is a separate administrative event and never changes the model verdict. The model and unprivileged console cannot invoke rollback.
@@ -144,7 +154,7 @@ sudo python3 /opt/defense-agent/rollback.py apply RECEIPT_ID --confirm PLAN_CONF
 
 Restoring a cron file can immediately re-enable its scheduled behavior; the plan explicitly warns about this. Restored systemd files remain disabled/stopped and require a separate administrator decision to activate them. Account rollback does not resurrect killed processes or sessions. Plans from a previous boot, legacy actions without receipts and incomplete forward actions require manual review. This conservative workflow is tested on the isolated Ubuntu VM, not a general restore facility for directory-managed accounts or arbitrary Linux files.
 
-Receipts live in `/var/lib/defense-agent/rollback` (directory `0700`, files `0600`). They contain hashes and metadata, not stored password hashes or raw shadow records. They retain refusal/interruption history independently of incident retention; automatic deletion is intentionally absent. Keep them with the quarantined evidence for administrative review. The read-only incident screen shows the original containment receipt; use `rollback.py list` for its current rollback state.
+Receipts live in `/var/lib/defense-agent/rollback` (directory `0700`, files `0600`). They contain hashes and metadata, not stored password hashes or raw shadow records. They retain refusal/interruption history independently of incident retention; automatic deletion is intentionally absent. Keep them with the quarantined evidence for administrative review. The read-only incident screen shows the original containment receipt. The response-history view reads a separate, root-owned public projection; private restore metadata remains inaccessible to the console.
 
 Run `sudo python3 aegis/live-rollback-tests.py` only on the isolated VM after installation. It uses temporary users, inert cron/systemd files and a private network namespace, verifies real traffic blocking/restoration, injects an interrupted account restore and cleans up active test artifacts. Receipts and quarantine evidence remain for review.
 
@@ -195,6 +205,13 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-13 — Response history and review queue
+
+- Add read-only terminal views for recorded responses, rollback outcomes and cases requiring manual review, with fixed shields, consistent separators, colored states and scrolling.
+- Publish a limited public receipt projection without private restore metadata; include legacy response steps and failed cases outside the ordinary recent-case window.
+- Keep rollback root-only and explicit. Historical containment is never presented as a fresh host-state check.
+- Validated on the Azure VM: **178 unit tests**, **26 live rollback checks** and **7 viewer checks** passed. The viewer checks cover unprivileged reads, private-receipt denial, public-projection write denial, restored/review states, excluded private metadata and real terminal navigation/scrolling/exit.
 
 ### 2026-10-12 — Explicit, conflict-checked rollback
 

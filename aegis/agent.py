@@ -652,6 +652,7 @@ def receive(s):
 def serve_executor(c):
     from rollback import Journal
     journal=Journal(c)
+    for receipt in journal.entries():journal.publish(receipt)
     executor=Executor(c);executor.firewall_init();s=credential_socket(c['executor_socket'],socket.SOCK_SEQPACKET);s.listen(8)
     while True:
         client,_=s.accept()
