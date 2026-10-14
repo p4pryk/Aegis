@@ -4,23 +4,68 @@ AEGIS is a small, always-on Linux VM security prototype. It collects selected ke
 
 This repository contains an intentionally vulnerable application for an **isolated training VM**. The application listens on port 8081; keep inbound access to that port closed in the cloud firewall and use an SSH tunnel for exercises.
 
-## Terminal demo
+## Terminal gallery
 
-These frames were rendered by the AEGIS console from selected **real incidents recorded during live VM tests**. They show the same layout and colors as the running terminal; the selection keeps each attack chain readable. Application session tokens are redacted in the console.
+The gallery was refreshed on **2026-10-14**. All six views use the same shields, separators and color scheme. Overview, events, chain and sources are rendered by the current console from selected real VM test data recorded on October 14. The event panels replay normalized events retained in that incident because the live event window had already advanced. Response history and review show archived terminal frames from October 13; their layout remains current. These are recorded examples, not the present state of a running VM.
 
-**Suspicious activity; response withheld because the link to a harmful consequence is missing.**
+| Key | View | What it shows |
+| --- | --- | --- |
+| `1` | Overview | Event stream alongside assessments, worker health and model budget. |
+| `2` | Events | Normalized observations from the configured collectors. |
+| `3` | Assessments | Incident summaries and recorded response outcomes. |
+| `4` | Incident chain | Chronological evidence, explicit links and the response gate. |
+| `5` | Source Health | Source availability, parser coverage, backlog and application adapters. |
+| `6` | Response History | Recorded containment and rollback outcomes. |
+| `7` | Review Required | Uncertain operations, refused rollback and failed assessments. |
 
-![AEGIS observes an SQL authentication bypass and application shell without taking an unsupported action](aegis/assets/suspicious.png)
+**Overview — collection, analysis and operational health in one terminal.**
 
-**Correlated SQL injection to cron/systemd persistence; exact files quarantined and session revoked.**
+![AEGIS overview with events, assessment state and model budget](aegis/assets/overview.png)
 
-![AEGIS correlates an SQL injection with persistence changes and verifies file quarantine and session revocation](aegis/assets/defended.png)
+<details>
+<summary><strong>Event stream [2]</strong> — normalized application observations</summary>
 
-**Correlated account creation; account and session contained, with an enrolled dedicated-source IP blocked.**
+![AEGIS event stream from an independent application test](aegis/assets/events.png)
 
-![AEGIS verifies account quarantine, session revocation and a dedicated-source IP block](aegis/assets/account.png)
+</details>
 
-Yellow marks suspicious observations, red marks an error or confirmed policy violation, and blue marks a verified defense. A failed login or isolated shell launch alone does not trigger an IP block. The header stays fixed while the event and case panels refresh.
+<details>
+<summary><strong>Incident chain [4]</strong> — evidence links and response gate</summary>
+
+Shared request/session identifiers provide application-reported context. This test case received no model verdict because the ordinary-analysis budget was reserved; containment was withheld and manual review was required.
+
+![AEGIS incident chain with context links and containment withheld](aegis/assets/application-chain.png)
+
+</details>
+
+<details>
+<summary><strong>Source Health [5]</strong> — system coverage and independent application adapters</summary>
+
+The frame was recorded after a collector restart. The application sources are quiet because previously consumed records were checkpointed; zero counters refer to the new collector session.
+
+![AEGIS source coverage and JSONL/access-log adapters](aegis/assets/application-sources.png)
+
+</details>
+
+<details>
+<summary><strong>Response History [6]</strong> — containment and rollback outcomes</summary>
+
+Recorded test receipts include restored and contained states. They do not certify the current state of a host or firewall rule.
+
+![AEGIS response history with recorded containment and rollback results](aegis/assets/response-history.png)
+
+</details>
+
+<details>
+<summary><strong>Review Required [7]</strong> — operations needing an administrator</summary>
+
+Uncertain rollback and identity conflicts require inspection. This screen is read-only; rollback remains a separate root-only operation.
+
+![AEGIS review queue for uncertain operations and refused rollback](aegis/assets/review-required.png)
+
+</details>
+
+Yellow marks suspicious activity or uncertainty, red marks errors and review items, and blue marks recorded defense/rollback outcomes. The header stays fixed while content refreshes. Use `j`/`k` to scroll detail views and `n`/`p` to select an incident in the chain view.
 
 ## How it works
 
@@ -29,7 +74,9 @@ flowchart LR
     A[Linux audit] --> I[Durable bounded inbox]
     I --> C[Normalize and correlate]
     J[SSH and selected journald sources] --> C
-    B[Training app telemetry] --> C
+    B[Configured application JSONL / access logs] --> C
+    F[System log files] --> C
+    T[Optional training app telemetry] --> C
     C --> D[Evidence case: events and causal links]
     D --> E[Bounded model assessment]
     E --> F[Root-owned policy and target recheck]
@@ -195,11 +242,7 @@ Up to eight explicitly configured files are polled every 200 ms, at most 25 chun
 
 Run `sudo python3 live-application-source-tests.py` only on the isolated VM with AEGIS installed. It temporarily configures an independent loopback HTTP application, exercises real login/account operations and a SQL-like request, verifies normalized correlation, restarts the collector to check replay, and restores the original configuration. It does not demonstrate successful SQL exploitation or automatic containment of arbitrary applications.
 
-Recorded independent-application test frames (after a collector restart): the adapters are quiet because their records were already checkpointed. The chain shows application-reported links and the withheld-response gate. The model budget was reserved, so this case required manual review; these images do not show a successful model assessment or the current VM state.
-
-![Configured independent application sources in the AEGIS terminal](aegis/assets/application-sources.png)
-
-![Independent application request and session context with containment withheld](aegis/assets/application-chain.png)
+See the [terminal gallery](#terminal-gallery) for source coverage and an independent-application incident chain.
 
 ## Linux system-log coverage
 
@@ -287,6 +330,13 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-14 — Terminal gallery refresh and repository hygiene
+
+- Replace the October 6 demo images with a six-view gallery covering overview, events, incident chains, source health, response history and manual review. Document all seven navigation keys; keep secondary images collapsible and distinguish current rendering from archived test frames.
+- Reuse recorded VM evidence without starting the VM or changing agent behavior. Check image layout, documentation links and repository contents before publication.
+- Credential audit: Gitleaks 8.30.1 reported zero findings across all 18 pre-update Git commits and the complete staged publication tree. OCR-assisted inspection covered five historical and six gallery images, with zero scanner findings. GitHub had no additional branches, tags, releases, Actions runs/artifacts or issue/PR records at the time of inspection. This is a point-in-time check, not a guarantee against every possible secret format.
+- Extend credential-file exclusions and verify that local SSH keys, runtime configurations and evidence exports remain outside Git. The example model configuration contains placeholders; the worker obtains Azure credentials at runtime through managed identity. Deliberately synthetic training credentials remain part of the isolated demo.
 
 ### 2026-10-14 — Application-independent log adapters
 
@@ -390,3 +440,14 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 - Required the full causal evidence set before any response, and kept a case out of `defended` unless every action returns verified success.
 - Added regression tests for a model returning only part of the plan and for missing evidence. All 67 unit tests passed.
 - Re-ran the live SSH account-creation exercise on the Azure lab VM: the account was quarantined; the short test session had already closed, which the executor verified; and the source IP remained reachable without prior failures. The response completed about 9.4 seconds after the last evidence event in this run. The VM was deallocated after testing.
+
+## Before publishing changes
+
+Keep operational configuration, private keys and evidence exports outside Git. The bundled application's synthetic test credentials are intentionally public; never reuse them for a deployed application. Check the staged changes and history with [Gitleaks](https://github.com/gitleaks/gitleaks):
+
+```sh
+gitleaks git . --pre-commit --staged --redact=100
+gitleaks git . --log-opts=--all --redact=100
+```
+
+Also inspect screenshot text and metadata: source-code secret scanners do not reliably inspect pixels. If a real credential is ever published, revoke or rotate it first; removing it from the latest file alone does not remove historical copies.

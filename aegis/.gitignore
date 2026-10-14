@@ -12,3 +12,12 @@ __pycache__/
 /config.json
 /live-results/
 .DS_Store
+
+# Local credentials and key stores
+*.p8
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+credentials*.json
