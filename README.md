@@ -1,6 +1,6 @@
 # AEGIS — Linux Defense Agent
 
-AEGIS is a small, always-on Linux VM security prototype. It collects selected kernel audit, SSH and training-application events; joins related events into an evidence-backed case; asks a model to describe the chain; and runs a narrowly scoped response only when local policy can verify the target. The read-only console updates in a terminal while the systemd services continue working in the background.
+AEGIS is a small, always-on Linux VM security prototype. It collects selected kernel audit, SSH, system and configured application events; joins related events into an evidence-backed case; asks a model to describe the chain; and runs a narrowly scoped response only when local policy can verify the target. The read-only console updates in a terminal while the systemd services continue working in the background.
 
 This repository contains an intentionally vulnerable application for an **isolated training VM**. The application listens on port 8081; keep inbound access to that port closed in the cloud firewall and use an SSH tunnel for exercises.
 
@@ -133,6 +133,74 @@ Review required includes analysis failures/timeouts, failed responses, incomplet
 
 The console reads up to 200 recent public receipts, 200 response steps and 200 failed cases independently of the normal 40-case window; truncation and unavailable history are explicit warnings. Older entries remain in the database/root ledger. Root publishes only action, allowed target, timestamps, receipt state and refusal diagnostics to `response-history/`; account fingerprints, restore snapshots, session tokens and operator reasons remain private. Existing receipts are projected when the executor starts.
 
+## Application-independent telemetry
+
+AEGIS can read application logs without the bundled vulnerable application or broker. Add `application_sources` to `/etc/defense-agent/config.json`, then restart `defense-agent`. The legacy `application_enabled` flag controls only the demo broker; generic sources work independently.
+
+```json
+{
+  "application_sources": [
+    {
+      "name": "shop-backend",
+      "application": "shop",
+      "path": "/var/log/shop/security.jsonl",
+      "format": "jsonl",
+      "owner_uid": 0,
+      "fields": {
+        "time": "timestamp",
+        "event": "audit.action",
+        "outcome": "audit.result",
+        "user": "audit.user",
+        "request_id": "audit.request",
+        "session_id": "audit.session"
+      },
+      "events": {"login": "authentication", "user_added": "account_created"}
+    },
+    {
+      "name": "shop-gateway",
+      "application": "shop",
+      "path": "/var/log/nginx/shop-security.jsonl",
+      "format": "jsonl"
+    }
+  ]
+}
+```
+
+JSONL means one JSON object per complete line. Without mapping, fields use these names: `time`, `event`, `outcome`, `user`, `ip`, `request_id`, `session_id`, `method`, `path`, `status`. `time` is Unix seconds or timezone-qualified ISO 8601. Required: `time` and a recognized `event`; other fields are optional. Outcomes are exactly `success`, `failure` or `unknown`. Supported events: `http_request`, `authentication`, `account_created`, `permission_changed`, `security_alert`, `application_error`. Unknown events and invalid records are counted; arbitrary message text is not interpreted as a security instruction. Mapping accepts dotted object paths, not executable expressions or regexes.
+
+A native record could be:
+
+```json
+{"time":"2026-10-14T12:00:00Z","event":"authentication","outcome":"success","user":"alice","ip":"192.0.2.10","request_id":"server-issued-request-42","session_id":"opaque-session-reference"}
+```
+
+For Nginx, configure this in the `http` context, enable the log for the intended server, and propagate the server-issued ID to the application's own structured log:
+
+```nginx
+log_format aegis_json escape=json
+  '{"time":"$time_iso8601","event":"http_request","ip":"$remote_addr",'
+  '"method":"$request_method","path":"$request_uri","status":$status,'
+  '"request_id":"$request_id"}';
+access_log /var/log/nginx/shop-security.jsonl aegis_json;
+proxy_set_header X-Request-ID $request_id;
+```
+
+A separate adapter, `"format":"access"`, reads the standard numeric-client-IP Common/Combined access format used by [Apache](https://httpd.apache.org/docs/2.4/logs.html) and [Nginx](https://nginx.org/en/docs/http/ngx_http_log_module.html). It does not extract request/session IDs from that format. Custom suffixes, multiline errors, container JSON wrappers, SQL database logs and arbitrary free text need an explicit adapter or conversion to JSONL. Select one authoritative stream per producer; AEGIS does not deduplicate copies across configured application files or journal streams. Ensure the producer flushes logs promptly; a collector cannot read buffered records before they are written.
+
+Sources sharing an `application` name can contribute to the same bounded batch. Request/session identifiers are hashed before persistence and create **producer-reported context links**, never independently verified kernel identities. Identical identifiers in different applications do not link. IP or time proximity alone creates no chain edge. Failed logins require five reports for the same account/IP before opening a case; SQL signatures, account/permission operations, security alerts and application errors are review signals. A successful HTTP status does not establish exploitation. Application batches contain at most 32 evidence records (including context), keeping even large normalized records within the model input bound; recent-context lookup is bounded to 256 events over ten minutes. New evidence can invalidate a pending assessment; high-volume applications may exceed these limits and require review/tuning.
+
+No generic application record authorizes automatic containment. Session revocation and other application-specific actions still need an explicit, independently validated integration; the existing broker and audited-host response policies are unchanged. The model receives normalized metadata in the existing untrusted-log boundary. Raw messages, bodies, headers, URL queries and session tokens are discarded; paths and correlation identifiers are retained only as hashes. Hashes are correlation aids, not a guarantee of anonymization. Logged user names and IPs remain evidence.
+
+Up to eight explicitly configured files are polled every 200 ms, at most 25 chunks per source per poll and 8 KiB per record. The shared tailer checkpoints records/cursors together, handles partial lines and reports rotation/truncation gaps. Only regular files owned by `owner_uid` (default root), without group/world write access, are accepted; final-path symlinks are rejected. Set the expected producer UID when logs are owned by an application account. Ownership controls which files are read; it does not make their contents trusted. Restart is required after configuration changes; changing a source definition starts a separate cursor and can replay recent events. **Source Health [5]** shows each adapter, its application, path, parser counts, backlog and availability. Readable files do not independently prove producer liveness.
+
+Run `sudo python3 live-application-source-tests.py` only on the isolated VM with AEGIS installed. It temporarily configures an independent loopback HTTP application, exercises real login/account operations and a SQL-like request, verifies normalized correlation, restarts the collector to check replay, and restores the original configuration. It does not demonstrate successful SQL exploitation or automatic containment of arbitrary applications.
+
+Recorded independent-application test frames (after a collector restart): the adapters are quiet because their records were already checkpointed. The chain shows application-reported links and the withheld-response gate. The model budget was reserved, so this case required manual review; these images do not show a successful model assessment or the current VM state.
+
+![Configured independent application sources in the AEGIS terminal](aegis/assets/application-sources.png)
+
+![Independent application request and session context with containment withheld](aegis/assets/application-chain.png)
+
 ## Linux system-log coverage
 
 The default `system_log_mode: "auto"` selects journald when `journalctl` and its runtime socket are present at core startup, otherwise it selects text files. This is a startup capability check, not proof that every producer logs correctly; runtime collector failures remain visible. The installer still targets systemd-based Ubuntu/Debian. Paths and parsers for `/var/log/secure` and `/var/log/messages` are supported, but this is not a tested RHEL installer or a claim to support every Linux distribution.
@@ -219,6 +287,15 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-14 — Application-independent log adapters
+
+- Add explicitly configured JSONL and Common/Combined access-log sources, independent of the demo broker. Support nested field names and event-name mappings, per-source ownership checks, bounded reads and durable restart/rotation handling through the shared tailer.
+- Correlate application-reported request/session hashes within one configured application; isolate different applications and retain metadata only. Ordinary HTTP traffic and isolated login failures do not open cases. HTTP success and SQL signatures do not prove exploitation or authorize containment.
+- Add application-source diagnostics to Source Health and guidance to the model for producer-reported evidence. Preserve existing audited-host and demo response policy. Remove an unused demo-module import from the legacy adapter.
+- Bound application evidence to 32 records and avoid redundant links; a maximum-field-size test guards the existing 48,000-byte model input limit. The chain view warns when its evidence limit is reached.
+- Validated on the Ubuntu Azure VM: **212 unit tests**, **19 independent-application checks**, **15 system-source regression checks** and **17 existing application-defense checks** passed. The independent HTTP application exercised failed/successful logins, an authenticated in-memory account operation, three file adapters, request/session links, secret filtering and restart deduplication. SQL-like input was a signature test, not a successful SQL exploit. Existing defense tests verified real account/session containment and blocked HTTP traffic.
+- The independent application case reached the unchanged ordinary-analysis budget limit and entered explicit manual review after its deadline; it did **not** receive a model assessment. The response reserve remained available for the existing verified-defense tests. Configuration was restored and services stopped after validation.
 
 ### 2026-10-14 — Broader Linux system-log coverage
 

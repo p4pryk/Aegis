@@ -232,7 +232,7 @@ class CorrelatedEngine:
         changed=False
         for e in [*extra,event]:
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
-            if count>=(64 if kind in ('host_change','system_activity') else 256):break
+            if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
         if changed:
             from response import archive
@@ -560,6 +560,8 @@ class CorrelatedEngine:
                 app_kind={'/login':'app_login','/accounts':'app_account_job','/persistence':'app_persistence_job'}.get(request['details'].get('path'))
                 match=next((e for e in events if e['kind']==app_kind and e['details'].get('ip')==request['details'].get('ip') and abs(e['event_time']-request['event_time'])<=2),None) if app_kind else None
                 if match:edges.append({'from':request['event_id'],'to':match['event_id'],'relation':'same_ip_and_path_nearby_time_context_not_causal'})
+        from application_sources import links as application_links
+        edges.extend(application_links(events))
         from telemetry import links
         edges.extend(edge for edge in links(events) if edge not in edges)
         actor=next((e['details']['user'] for e in events if e['kind']=='ssh_session_open'),None);authorization='not_established'
@@ -700,6 +702,8 @@ def serve_core(c):
     store=Store(c);engine=CorrelatedEngine(c,store,None);spool=Spool(c);meter=Meter()
     from system_sources import discover,family,IDENTIFIERS
     from file_logs import Files
+    from application_sources import Applications
+    applications=Applications(engine)
     mode,paths,journal_available=discover(c)
     files=Files(engine,paths) if c.get('system_logs_enabled',True) and mode=='files' else None
     reader_config=dict(c,_system_source_mode=mode)
@@ -742,6 +746,7 @@ def serve_core(c):
                 engine.app_health=dict(getattr(engine,'app_health',{}),connected=False,checked_at=time.time())
                 store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
         if files:consumed+=files.poll()
+        consumed+=applications.poll()
         engine.tick()
         meter.add(consumed,time.monotonic()-loop_start)
         if time.time()-last_health>5:
@@ -768,6 +773,8 @@ def serve_core(c):
             if files:
                 health['sources']=[dict(source,status='DISABLED',reason='System log files selected; journal authentication is not consumed') if source['name']=='SSH journal' else source for source in health['sources']]
                 health['sources'].extend(files.sources())
+            health['sources'].extend(applications.sources())
+            health['application_coverage']=[dict(name=s['name'],application=s['application'],format=s['format'],path=s['path']) for s in applications.config.values()]
             health['system_log_coverage']={'mode':mode,'journal_available_at_start':journal_available,'paths':paths,
                 'categories':['Authentication / PAM','Accounts / groups','Sudo / su','Cron / timers','Service transitions','AppArmor / SELinux denials','Kernel OOM / process faults'],
                 'limitations':'Selected formats only; file records cannot prove kernel session/process identity. Process execution remains scoped to configured audit rules.',

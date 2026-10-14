@@ -8,11 +8,13 @@ class Files:
     def close(self):
         for stream in self.handles.values():stream.close()
         self.handles={}
+    def trusted(self,info,path):
+        return stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022
     def open(self,path):
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
         stream=os.fdopen(fd,'rb');info=os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
-            stream.close();raise ValueError('Expected a root-owned, non-writable regular log file')
+        if not self.trusted(info,path):
+            stream.close();raise ValueError('Expected an approved owner and a non-writable regular log file')
         return stream
     def poll(self,force=False):
         now=time.time()
@@ -23,18 +25,18 @@ class Files:
         for category,path in self.paths.items():
             try:
                 info=os.stat(path,follow_symlinks=False)
-                if stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022:available.add(category)
+                if self.trusted(info,path):available.add(category)
             except OSError:pass
         for category,path in self.paths.items():
             h=self.health.setdefault(category,dict(name=category+' file',path=path,read=0,parsed=0,unrecognized=0,duplicates=0,stale=0,invalid=0))
-            key='file_cursor_'+hashlib.sha256(path.encode()).hexdigest()[:16]
+            key=self.cursor_key(category,path)
             try:
                 cursor=self.engine.store.state(key) or {};gap=cursor.get('gap',False)
                 stream=self.handles.get(path)
                 if stream is None:
                     stream=self.open(path);self.handles[path]=stream
                 info=os.fstat(stream.fileno())
-                if info.st_uid!=0 or info.st_mode&0o022:raise ValueError('Log permissions changed')
+                if not self.trusted(info,path):raise ValueError('Log permissions changed')
                 identity=[info.st_dev,info.st_ino]
                 position=cursor.get('offset',0)
                 if cursor.get('identity')!=identity:
@@ -58,20 +60,8 @@ class Files:
                         if not raw.endswith(b'\n'):
                             stream.seek(start);break  # Finish the line after the producer appends its newline.
                         position=stream.tell();h['read']+=1;count+=1;h['last_record_at']=now
-                        try:record=text_record(raw.decode('utf-8').rstrip('\n'),now)
-                        except UnicodeError:record=None
-                        if not record:h['unrecognized']+=1;continue
-                        program,stamp,message,inferred=record;target=family(program)
-                        if category=='system' and target!='system' and target in available:
-                            h['duplicates']+=1;continue
-                        if not -5<=now-stamp<=600:h['stale']+=1;continue
                         identifier='file:'+hashlib.sha256((path+':'+str(identity)+':'+str(cursor['generation'])+':'+str(start)).encode()).hexdigest()
-                        event=parse(program,message,stamp,identifier,path)
-                        if event:
-                            event['details']['timestamp_inferred']=inferred
-                            from system_sources import ingest
-                            ingest(self.engine,event);h['parsed']+=1
-                        else:h['unrecognized']+=1
+                        self.accept(category,raw,identifier,now,available,h)
                     cursor.update(identity=identity,offset=position,anchor=self.anchor(stream,position),gap=gap)
                     self.engine.store.state(key,cursor)
                 # Drain the old inode before switching on rename rotation. Never open compressed archives.
@@ -86,6 +76,22 @@ class Files:
             except (OSError,ValueError) as exc:
                 h.update(status='MISSING' if isinstance(exc,FileNotFoundError) else 'DOWN',reason=type(exc).__name__+': source unavailable or unsafe',checked_at=now,pending=0,unit='bytes',lag_seconds=0)
         return count
+    def cursor_key(self,category,path):
+        return 'file_cursor_'+hashlib.sha256(path.encode()).hexdigest()[:16]
+    def accept(self,category,raw,identifier,now,available,h):
+        try:record=text_record(raw.decode('utf-8').rstrip('\n'),now)
+        except UnicodeError:record=None
+        if not record:h['unrecognized']+=1;return
+        program,stamp,message,inferred=record;target=family(program)
+        if category=='system' and target!='system' and target in available:
+            h['duplicates']+=1;return
+        if not -5<=now-stamp<=600:h['stale']+=1;return
+        event=parse(program,message,stamp,identifier,self.paths[category])
+        if event:
+            event['details']['timestamp_inferred']=inferred
+            from system_sources import ingest
+            ingest(self.engine,event);h['parsed']+=1
+        else:h['unrecognized']+=1
     @staticmethod
     def anchor(stream,position):
         stream.seek(max(0,position-64));return hashlib.sha256(stream.read(min(64,position))).hexdigest()

@@ -123,10 +123,17 @@ def source_lines(data,width,now):
         lines.extend(wrapped(coverage.get('limitations',''),width,'warning'))
         for source in data.get('sensor_health',{}).get('sources',[]):
             if 'read' in source:lines.extend(wrapped(f"{source['name']}: read {source['read']} / parsed {source['parsed']} / unrecognized {source['unrecognized']} / copies skipped {source['duplicates']} / stale {source['stale']} / invalid {source['invalid']}",width))
+    applications=data.get('sensor_health',{}).get('application_coverage',[])
+    if applications:
+        lines.append('-'*width)
+        lines.extend(wrapped('APPLICATION SOURCES / PRODUCER-REPORTED EVIDENCE',width))
+        for source in applications:
+            lines.extend(wrapped(source['application']+' / '+source['name']+' / '+source['format']+' / '+source['path'],width))
+        lines.extend(wrapped('Shared identifiers provide context, not proof of compromise. Generic application sources cannot authorize containment.',width,'warning'))
     lines.append('-'*width)
     lines.extend(wrapped('Checked every 5s / kernel audit probe every 30s',width))
     lines.extend(wrapped('QUIET means the collector is alive, not that the source is disconnected.',width))
-    lines.extend(wrapped('Scope: selected journal streams, kernel audit and the trusted application log. Liveness does not prove that every application emits logs. Historical gaps remain warnings after recovery.',width))
+    lines.extend(wrapped('Scope: selected journal streams, kernel audit and configured application logs. Liveness does not prove that every application emits logs. Historical gaps remain warnings after recovery.',width))
     return lines
 
 def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None,case_id=None,offset=0):

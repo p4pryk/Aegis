@@ -1,6 +1,5 @@
 """Root-owned application telemetry joined with independent kernel audit records."""
 import fcntl,json,os,pathlib,re,stat,time,pwd
-from vulnerable_app import rpc
 LOG='/var/log/defense-agent/application.jsonl'
 def ingest(engine):
     try:fd=os.open(engine.c.get('application_log',LOG),os.O_RDONLY|os.O_NOFOLLOW)
