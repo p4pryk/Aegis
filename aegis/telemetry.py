@@ -4,7 +4,7 @@ import re
 import time
 
 CHANGES=('identity_change','security_file_change','persistence_change')
-CONTEXT=(*CHANGES,'sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event','process_exec')
+CONTEXT=(*CHANGES,'sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event','process_exec','system_session','system_identity','system_auth_failure','system_auth_success','system_privilege','system_service','system_schedule','system_access_denied','system_resource_failure','system_process_fault')
 RECORDS={'USER_CHAUTHTOK','1108','GRP_CHAUTHTOK','1133','CHUSER_ID','1125','ACCT_LOCK','1135','ACCT_UNLOCK','1136','USER_MGMT','1102','GRP_MGMT','1132','ADD_GROUP','1116','DEL_GROUP','1117','CHGRP_ID','1119','DEL_USER','1115'}
 
 

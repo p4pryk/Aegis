@@ -38,6 +38,7 @@ def arguments(source, config, cursor=None):
         if not args:
             return None
     else:
+        if config.get('system_logs_enabled',True) and config.get('_system_source_mode')=='files':return None
         args = ['journalctl', '--follow', '--since=10 minutes ago', '--output=json',
                 '_COMM=sshd', '_COMM=sshd-session']
     if cursor:

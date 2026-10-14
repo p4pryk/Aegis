@@ -106,12 +106,23 @@ def source_lines(data,width,now):
     from monitoring import visible_sources
     lines=[]
     for source in visible_sources(data,now):
-        status=source['status'];level='critical' if status in ('DOWN','STALE') else 'warning' if status in ('GAP','LAGGING','UNKNOWN') else 'healthy' if status in ('LIVE','QUIET') else 'neutral'
+        status=source['status'];level='critical' if status in ('DOWN','STALE','MISSING') else 'warning' if status in ('GAP','LAGGING','UNKNOWN') else 'healthy' if status in ('LIVE','QUIET') else 'neutral'
         marker='[OK]' if status in ('LIVE','QUIET') else '[--]' if status=='DISABLED' else '[!!]'
         lines.extend(wrapped(f"{marker} {source['name']:<18} {status}",width,level))
         last=source.get('last_record_at');age=f"{max(0,now-last):.0f}s ago" if last else 'not seen in this collector session'
         lines.extend(wrapped('     Last intake: '+age+' | Pending: '+str(source.get('pending',0))+' '+source.get('unit','records')+f" | Delay: {source.get('lag_seconds',0):.1f}s",width))
         lines.extend(wrapped('     '+source.get('reason',''),width,level));lines.append('')
+    coverage=data.get('sensor_health',{}).get('system_log_coverage',{})
+    if coverage:
+        lines.append('-'*width)
+        lines.extend(wrapped('SYSTEM LOG COVERAGE / '+('ENABLED' if coverage.get('enabled') else 'DISABLED')+' / '+str(coverage.get('mode','unknown')).upper(),width))
+        counters=coverage.get('journal_counts',{})
+        if coverage.get('mode')=='journal':lines.extend(wrapped(f"Service journal: read {counters.get('read',0)} / parsed {counters.get('parsed',0)} / unrecognized {counters.get('unrecognized',0)}",width))
+        for category in coverage.get('categories',[]):lines.extend(wrapped('  Parser: '+category,width))
+        for category,path in coverage.get('paths',{}).items():lines.extend(wrapped('  '+category+': '+path+(' / fallback candidate; not being read' if coverage.get('mode')=='journal' else ''),width))
+        lines.extend(wrapped(coverage.get('limitations',''),width,'warning'))
+        for source in data.get('sensor_health',{}).get('sources',[]):
+            if 'read' in source:lines.extend(wrapped(f"{source['name']}: read {source['read']} / parsed {source['parsed']} / unrecognized {source['unrecognized']} / copies skipped {source['duplicates']} / stale {source['stale']} / invalid {source['invalid']}",width))
     lines.append('-'*width)
     lines.extend(wrapped('Checked every 5s / kernel audit probe every 30s',width))
     lines.extend(wrapped('QUIET means the collector is alive, not that the source is disconnected.',width))
@@ -150,7 +161,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
     from monitoring import visible_sources
     sources=visible_sources(data,now)
-    source_warning=any(s['status'] in ('DOWN','STALE','GAP','LAGGING','UNKNOWN') for s in sources)
+    source_warning=any(s['status'] in ('DOWN','STALE','MISSING','GAP','LAGGING','UNKNOWN') for s in sources)
     lines.append(Line(fit('Sources: '+' | '.join(s['name'].split()[0]+' '+s['status'] for s in sources)+'  [5] details',width),'warning' if source_warning else 'healthy'))
     if mode in ('responses','review'):
         rows=data.get('responses',[])

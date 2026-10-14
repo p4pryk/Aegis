@@ -42,7 +42,7 @@ class SourceHealth(unittest.TestCase):
         self.assertEqual(self.states()[3]['status'],'GAP')
 
     def test_disabled_sources_are_explicit(self):
-        self.c.update(application_enabled=False,journal_units=[],journal_identifiers=[],journal_comms=[])
+        self.c.update(system_logs_enabled=False,application_enabled=False,journal_units=[],journal_identifiers=[],journal_comms=[])
         rows=self.states();self.assertEqual(rows[2]['status'],'DISABLED');self.assertEqual(rows[3]['status'],'DISABLED')
 
     def test_stale_core_never_shows_current_healthy_sources(self):

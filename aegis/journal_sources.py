@@ -27,6 +27,11 @@ def command(config):
         for value in values[:32]:
             if isinstance(value, str) and SAFE.fullmatch(value):
                 selectors.append(f'{field}={value}')
+    if config.get('system_logs_enabled',True) and config.get('_system_source_mode','journal')=='journal':
+        from system_sources import IDENTIFIERS
+        selectors.extend('SYSLOG_IDENTIFIER='+name for name in IDENTIFIERS if name not in ('sshd','sshd-session'))
+        selectors.append('_TRANSPORT=kernel')
+    selectors=list(dict.fromkeys(selectors))
     args = ['journalctl', '--follow', '--since=10 minutes ago', '--output=json']
     for i, selector in enumerate(selectors):
         if i:

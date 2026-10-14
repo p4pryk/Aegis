@@ -133,6 +133,20 @@ Review required includes analysis failures/timeouts, failed responses, incomplet
 
 The console reads up to 200 recent public receipts, 200 response steps and 200 failed cases independently of the normal 40-case window; truncation and unavailable history are explicit warnings. Older entries remain in the database/root ledger. Root publishes only action, allowed target, timestamps, receipt state and refusal diagnostics to `response-history/`; account fingerprints, restore snapshots, session tokens and operator reasons remain private. Existing receipts are projected when the executor starts.
 
+## Linux system-log coverage
+
+The default `system_log_mode: "auto"` selects journald when `journalctl` and its runtime socket are present at core startup, otherwise it selects text files. This is a startup capability check, not proof that every producer logs correctly; runtime collector failures remain visible. The installer still targets systemd-based Ubuntu/Debian. Paths and parsers for `/var/log/secure` and `/var/log/messages` are supported, but this is not a tested RHEL installer or a claim to support every Linux distribution.
+
+Additional normalized events cover PAM sessions/authentication failures, account/group management messages, cron activity, service/timer transitions, and kernel OOM/process faults or AppArmor/SELinux denials **when emitted into the selected streams**. Unknown messages are counted; raw messages, command arguments, credentials and key contents are not retained. Kernel audit remains independent, with its existing scoped process/file rules. This does not add full process auditing for every user, database audit logs or arbitrary application parsers.
+
+For file fallback, the collector chooses one existing path per category: `auth.log` or `secure`, `syslog` or `messages`, `kern.log`, and `cron`. Override with `system_log_mode: "files"` or `"journal"`, and optional `system_log_paths` mapping of `auth`, `system`, `kernel`, `cron` to absolute paths. Set `system_logs_enabled: false` to restore the previous explicitly configured journal collection. Restart the core after configuration changes. File mode disables the journal SSH reader and skips overlapping system categories in the service-journal reader; configured application/web journal streams remain separate. Auth/kernel/cron copies in syslog are skipped when their dedicated safe file is present. Routing prevents concurrent duplicate intake; switching transports can replay recent evidence because file and journal IDs differ.
+
+File input is read continuously in bounded batches: at most 25 line chunks per source every 200 ms, maximum four sources and 8 KiB per line. Events and file positions commit together. Partial lines wait for completion; oversized records are discarded and reported. Rotation drains the open inode before switching; replacement after restart, truncation/regrowth and bounded initial replay produce a gap warning. Initial reads are limited to the last 1 MiB and only events within the correlation window are admitted. Files must be root-owned regular files without group/world write permissions; symlinks are rejected. RFC3164 timestamps use the host's local timezone and the nearest year; ISO timestamps are also supported. A readable file does not prove producer liveness or lossless collection.
+
+Press **5** for parser coverage, the selected transport, candidate paths, file status/backlog and read/parsed/unrecognized/copy/stale/invalid counters. Missing or inaccessible sources are explicit. Text records never acquire invented boot, audit-session or process identity and cannot authorize a response. Repeated authentication failures and other review signals create bounded `system_activity` cases. Without a verified audit-session identity, events are batched by category (authentication, services, scheduler, kernel), with at most 64 evidence records per case; shared category/time does not imply a causal chain. The failure threshold still applies to the same reported account/source pair; unrelated users do not add up to one login chain. Normal events remain observations/context. The existing model budget, evidence limits, response policy and root-only rollback remain in force.
+
+Run `sudo python3 aegis/live-system-source-tests.py` only on the isolated test VM after installation. It verifies real service/PAM collection, a tagged cron fixture, durable file reading and temporary core file-mode configuration, then restores the configuration and removes its temporary log.
+
 ## Manual rollback
 
 New executor actions produce a root-private receipt before changing the host and mark it reversible only after verifying the resulting state. The incident chain shows the receipt ID. Historical containment remains recorded; rollback is a separate administrative event and never changes the model verdict. The model and unprivileged console cannot invoke rollback.
@@ -205,6 +219,14 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-14 — Broader Linux system-log coverage
+
+- Discover journald or configured system-log files at startup; add bounded file reading with durable positions, rotation/truncation diagnostics and category routing to avoid duplicate journal/file intake.
+- Normalize PAM, account/group, scheduler, service and selected kernel security/health messages into review-only evidence; preserve audited attribution where available without inferring it from text.
+- Extend Source health with supported parser categories, selected paths, missing-source diagnostics and parsing counters.
+- Batch unattributed events by category instead of creating a model job per account; keep the repeated-authentication threshold scoped to the same reported account/source pair.
+- Validated on the Ubuntu Azure VM: **193 unit tests**, **15 live source checks**, **8 SSH checks**, **17 application checks** and **17 persistence checks** passed. Source checks include real systemd/PAM intake, a tagged cron fixture, running-core file mode, restart/rotation/truncation, bounded batches, missing sources and unprivileged coverage output. A regression caught per-account model-queue amplification; category batching fixed it, and the legal-cron and attack-persistence scenarios passed on retest. Real model assessments of file-source cases were verified; repeated tests then reached the unchanged 30/40 ordinary-analysis limit, and a later batch correctly entered manual review while preserving the ten-call response reserve.
 
 ### 2026-10-13 — Response history and review queue
 
