@@ -51,7 +51,7 @@ class Applications(unittest.TestCase):
         for _ in range(5):self.insert(self.event(outcome='failure',user='alice',ip='192.0.2.1'))
         self.insert(self.event(outcome='success',user='alice',ip='192.0.2.1',request_id='r1',session_id='s1'))
         self.insert(self.event('permission_changed',outcome='success',request_id='r2',session_id='s1'))
-        snap=self.snapshot();self.assertEqual(len(snap['events']),7);self.assertFalse(snap['allowed_actions'])
+        snap=self.engine.snapshot(*self.cases()[-1]);self.assertEqual(len(snap['events']),7);self.assertFalse(snap['allowed_actions'])
         self.assertTrue(snap['edges']);self.assertTrue(all('not_causal' in e['relation'] for e in snap['edges']))
     def test_unrelated_accounts_do_not_add_up_to_failure_threshold(self):
         for n in range(8):self.insert(self.event(outcome='failure',user='user'+str(n),ip='192.0.2.1'))
@@ -70,9 +70,9 @@ class Applications(unittest.TestCase):
         a=self.event('authentication',session_id='s1');b=self.event('security_alert',session_id='s1')
         a['event_time']-=15;self.insert(b);self.insert(a)
         self.assertEqual(len(self.snapshot()['edges']),1);self.assertEqual(self.snapshot()['edges'][0]['from'],a['event_id'])
-    def test_many_actors_remain_one_bounded_batch(self):
+    def test_many_actors_are_isolated(self):
         for n in range(80):self.insert(self.event('security_alert',user='user'+str(n)))
-        self.assertEqual(len(self.cases()),1);self.assertEqual(len(self.snapshot()['events']),32)
+        self.assertEqual(len(self.cases()),80);self.assertEqual(len(self.snapshot()['events']),1)
     def test_maximum_normalized_batch_stays_within_model_input_bound(self):
         src=dict(self.source,application='a'*64,name='b'*64)
         for n in range(40):

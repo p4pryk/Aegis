@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         config_path.write_text(json.dumps(config));restart()
         check('Independent normal HTTP request succeeds',request('/normal')==404)
         wait(lambda:read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))
-        check('Normal request alone creates no incident',not read("SELECT id FROM cases WHERE subject=?",(app,)))
+        check('Normal request alone creates no incident',not read("SELECT id FROM cases WHERE subject LIKE ?",(app+':%',)))
         for _ in range(5):check('Real failed login is returned',request('/login',password='wrong')==401)
         check('Real successful login is returned',request('/login',password='test-password')==200)
         check('Authenticated in-memory account creation completes',request('/users',sid=session)==201 and 'temporary-user' in created)
@@ -75,25 +75,40 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         check('SQL signature is observed without claiming bypass',any(d.get('sqli_signature') for d in details) and all('bypass' not in d for d in details))
         raw=json.dumps(details)
         check('Passwords, session tokens and injection text are excluded',all(secret not in raw for secret in ('test-password',session,'IGNORE ALL RULES','SECRET')))
-        wait(lambda:read("SELECT id FROM cases WHERE subject=? AND json_array_length(evidence_json,'$.edges')>=2",(app,)))
-        case=read("SELECT evidence_json FROM cases WHERE subject=? ORDER BY updated_at DESC LIMIT 1",(app,))[0]
+        wait(lambda:read("SELECT id FROM cases WHERE subject LIKE ? AND json_array_length(evidence_json,'$.edges')>=2",(app+':%',)))
+        case=read("SELECT evidence_json FROM cases WHERE subject LIKE ? AND json_array_length(evidence_json,'$.edges')>=2 ORDER BY json_array_length(evidence_json,'$.events') DESC LIMIT 1",(app+':%',))[0]
         evidence=json.loads(case[0]);relations=[edge['relation'] for edge in evidence['edges']]
         check('Request and session links are application-reported context',any('request_id_hash' in r for r in relations) and any('session_id_hash' in r for r in relations) and all('not_causal' in r for r in relations))
         check('Generic logs cannot authorize defense',evidence['allowed_actions']==[])
+        # More than one model batch, with a core restart before the late consequence.
+        for n in range(95):
+            append('backend',dict(ts=time.time(),audit=dict(action='permission_changed' if n==94 else 'security_alert',session=session,request='continuation-'+str(n),actor='alice',remote='127.0.0.1',result='success')))
+            if n==44:
+                wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=70)
+                restart()
+        wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=120)
+        parts=read("SELECT c.id,p.root_id,p.part FROM cases c JOIN case_parts p ON p.case_id=c.id WHERE c.subject LIKE ?",(app+':%',))
+        check('Installed core persists continuation parts',max(r[2] for r in parts)>=4)
+        missing=read("SELECT e.event_id FROM correlation_events e WHERE e.subject=? AND json_extract(e.details_json,'$.request_id_hash') IN ("+','.join('?' for _ in range(95))+") AND NOT EXISTS (SELECT 1 FROM case_events c WHERE c.event_id=e.event_id)",(app,*[__import__('hashlib').sha256(('continuation-'+str(n)).encode()).hexdigest() for n in range(95)]))
+        check('All 95 continuation events reach case evidence',not missing)
+        late=read("SELECT c.case_id FROM case_events c WHERE json_extract(c.details_json,'$.event')='permission_changed' AND c.subject=?",(app,))
+        check('Late consequence is retained after restart',bool(late))
+        check('Every continuation part respects 32-record bound',all(r[0]<=32 for r in read("SELECT count(*) FROM case_events e JOIN cases c ON c.id=e.case_id WHERE c.subject LIKE ? GROUP BY c.id",(app+':%',))))
+        rows=read("SELECT kind,details_json FROM correlation_events WHERE subject=?",(app,))
         before=len(rows);restart();time.sleep(2)
         check('Core restart does not replay application records',len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))==before)
         wait(lambda:any(s.get('application')==app for s in console.read_snapshot('/var/lib/defense-agent/incidents.db')['sensor_health']['sources']))
         data=console.read_snapshot('/var/lib/defense-agent/incidents.db')
         check('Source Health identifies independent adapters','APPLICATION SOURCES' in '\n'.join(console.source_lines(data,120,time.time())))
         # Save only this test application's sanitized observations/cases, plus health metadata.
-        data['cases']=[c for c in data['cases'] if c['subject']==app]
+        data['cases']=[c for c in data['cases'] if c['subject'].startswith(app+':')]
         data['observations']=[o for o in data['observations'] if o.get('subject')==app]
         pathlib.Path('/tmp/aegis-application-preview.json').write_text(json.dumps(data))
-        outcome=wait(lambda:read("SELECT status,analysis_json FROM cases WHERE subject=? AND (json_extract(analysis_json,'$.summary') IS NOT NULL OR status='analysis_error')",(app,)),110)
+        outcome=wait(lambda:read("SELECT status,analysis_json FROM cases WHERE subject LIKE ? AND (json_extract(analysis_json,'$.summary') IS NOT NULL OR status='analysis_error')",(app+':%',)),110)
         assessed=bool(json.loads(outcome[0][1]).get('summary'))
         check('Independent case receives assessment or explicit bounded manual review',assessed or outcome[0][0]=='analysis_error')
         print(json.dumps({'model_assessed':assessed,'case_status':outcome[0][0]}),flush=True)
-        data=console.read_snapshot('/var/lib/defense-agent/incidents.db');data['cases']=[c for c in data['cases'] if c['subject']==app];data['observations']=[o for o in data['observations'] if o.get('subject')==app]
+        data=console.read_snapshot('/var/lib/defense-agent/incidents.db');data['cases']=[c for c in data['cases'] if c['subject'].startswith(app+':')];data['observations']=[o for o in data['observations'] if o.get('subject')==app]
         pathlib.Path('/tmp/aegis-application-preview.json').write_text(json.dumps(data))
     finally:
         server.shutdown();server.server_close();config_path.write_bytes(original);restart()

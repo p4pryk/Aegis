@@ -15,7 +15,10 @@ def timeline(case):
     allowed=evidence.get('allowed_actions',[]);policy=evidence.get('policy',{})
     lines=[('CASE '+case['id']+' / version '+str(case.get('version',0)),'neutral'),
            ('RECORDED FACTS — chronological; attribution is not proof of malicious intent','neutral')]
-    if len(events)>=(32 if case.get('kind')=='application_activity' else 64 if case.get('kind') in ('host_change','system_activity') else 256):
+    continuation=evidence.get('continuation')
+    if continuation:
+        lines.append(('CHAIN '+continuation['root_id']+' / part '+str(continuation['part'])+' / previous '+str(continuation.get('parent_id') or 'none'),'neutral'))
+    if not continuation and len(events)>=(32 if case.get('kind')=='application_activity' else 64 if case.get('kind') in ('host_change','system_activity') else 256):
         lines.append(('Case event limit reached: this view may omit additional telemetry.','warning'))
     if not events:lines.append(('Evidence snapshot not yet available.','warning'))
     for event in events:
@@ -61,7 +64,7 @@ def timeline(case):
         if not local:lines.append(('Attack assessment: '+str(analysis.get('attack'))+' | confidence score: '+str(analysis.get('confidence','unavailable')),'neutral'))
         for label,key in (('Description','summary'),('Uncertainty','uncertainty'),('Next step','next_step')):
             if analysis.get(key):lines.append((label+': '+analysis[key],'neutral'))
-    else:lines.append(('Assessment pending; no model verdict recorded.','warning'))
+    else:lines.append((('Assessment failed; manual review required.' if status=='analysis_error' else 'Waiting: '+case.get('queue_reason','assessment pending')+'; no model verdict recorded.'),'warning'))
     lines.append(('Recorded state: '+str(status),'neutral'))
     for action in decode(case.get('result_json'),[]):
         if not isinstance(action,dict):continue

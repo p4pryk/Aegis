@@ -193,7 +193,10 @@ class CorrelatedEngine:
     def __init__(self,c,store,execute):
         self.c=c;self.store=store;self.db=store.db;self.execute=execute
         self.boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip() if pathlib.Path('/proc/sys/kernel/random/boot_id').exists() else 'test-boot'
-        self.db.executescript('''CREATE TABLE IF NOT EXISTS cases(id TEXT PRIMARY KEY,created_at REAL,updated_at REAL,kind TEXT,subject TEXT,version INTEGER,status TEXT,evidence_json TEXT,analysis_json TEXT,result_json TEXT);
+        self.db.executescript('''CREATE TABLE IF NOT EXISTS case_parts(case_id TEXT PRIMARY KEY,root_id TEXT,parent_id TEXT,part INTEGER);
+        CREATE INDEX IF NOT EXISTS case_parts_root ON case_parts(root_id);
+        CREATE TABLE IF NOT EXISTS analysis_queue(case_id TEXT PRIMARY KEY,version INTEGER,queued_at REAL,boot_id TEXT,reason TEXT);
+        CREATE TABLE IF NOT EXISTS cases(id TEXT PRIMARY KEY,created_at REAL,updated_at REAL,kind TEXT,subject TEXT,version INTEGER,status TEXT,evidence_json TEXT,analysis_json TEXT,result_json TEXT);
         CREATE TABLE IF NOT EXISTS case_events(case_id TEXT,event_id TEXT,event_time REAL,kind TEXT,subject TEXT,details_json TEXT,PRIMARY KEY(case_id,event_id));
         CREATE TABLE IF NOT EXISTS case_status_history(case_id TEXT,status TEXT,time REAL,details_json TEXT);
         CREATE TABLE IF NOT EXISTS correlation_events(event_id TEXT PRIMARY KEY,event_time REAL,kind TEXT,subject TEXT,details_json TEXT);
@@ -220,6 +223,22 @@ class CorrelatedEngine:
         if case_id:
             row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
             if not row:return None
+        parent=None
+        if kind=='application_activity' and row:
+            identifier=row[0]
+            if self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
+            if self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(identifier,event['event_id'])).fetchone():return identifier
+            if len(self.events(identifier))>=32:
+                parent=identifier
+                # Seal the preceding part before new evidence can invalidate its assessment.
+                if self.db.execute('SELECT status FROM cases WHERE id=?',(parent,)).fetchone()[0]=='collecting':
+                    evidence=canonical(self.snapshot(parent,kind,subject,self.db.execute('SELECT version FROM cases WHERE id=?',(parent,)).fetchone()[0]))
+                    self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,parent))
+                    self.status(parent,'awaiting_analysis')
+                previous=self.events(parent)
+                from application_sources import carry_context
+                extra=carry_context(previous)
+                row=None
         identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+event['event_id']).encode()).hexdigest()[:24]
         if not row:
             # Enrichment can revisit the same account after containment. Keep the
@@ -229,8 +248,15 @@ class CorrelatedEngine:
             if active>=256:
                 self.store.state('correlation_overload',{'time':now,'active_cases':active});return None
             self.db.execute('INSERT INTO cases VALUES (?,?,?,?,?,?,?,?,?,?)',(identifier,now,now,kind,subject,0,'collecting','{}','{}','{}'));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,'collecting',now,'{}'))
+        if kind=='application_activity':
+            prior=self.db.execute('SELECT root_id,part FROM case_parts WHERE case_id=?',(parent,)).fetchone() if parent else None
+            self.db.execute('INSERT OR IGNORE INTO case_parts VALUES (?,?,?,?)',(identifier,prior[0] if prior else identifier,parent,prior[1]+1 if prior else 1))
+        if kind=='application_activity' and not parent:
+            root=self.db.execute('SELECT root_id FROM case_parts WHERE case_id=?',(identifier,)).fetchone()[0]
+            earlier={r[0] for r in self.db.execute('SELECT e.event_id FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=? AND p.case_id!=?',(root,identifier))}
+            extra=[e for e in extra if e['event_id'] not in earlier]
         changed=False
-        for e in [*extra,event]:
+        for e in ([event,*extra] if kind=='application_activity' else [*extra,event]):
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
             if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
@@ -576,7 +602,8 @@ class CorrelatedEngine:
             except (KeyError,ValueError,TypeError):pass
             if actor in self.c.get('ssh_account_creator_allowlist',[]) and not allowed:authorization='approved'
             elif actor and actor not in self.c.get('ssh_account_creator_allowlist',[]):authorization='unapproved'
-        return {'version':version,'events':events,'edges':edges,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'account_scope':'lab_ only; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved lab account creation; prior failures additionally required for dedicated IP block'}}
+        part=self.db.execute('SELECT root_id,parent_id,part FROM case_parts WHERE case_id=?',(identifier,)).fetchone()
+        return {'continuation':dict(root_id=part[0],parent_id=part[1],part=part[2]) if part else None,'version':version,'events':events,'edges':edges,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'account_scope':'lab_ only; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved lab account creation; prior failures additionally required for dedicated IP block'}}
     def validate_result(self,row,result):
         identifier,version,evidence=row;data=json.loads(evidence)
         if not isinstance(result,dict) or result.get('case_id')!=identifier or type(result.get('version')) is not int or result['version']!=version or result.get('snapshot_hash')!=hashlib.sha256(evidence.encode()).hexdigest():raise ValueError('stale version or snapshot hash')
@@ -612,6 +639,12 @@ class CorrelatedEngine:
         if not data['allowed_actions']:
             self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence');return
         if not analysis['proposed_actions']:self.status(identifier,'observing');return
+        queued=self.db.execute('SELECT queued_at,boot_id FROM analysis_queue WHERE case_id=? AND version=?',(identifier,version)).fetchone()
+        if queued and (time.time()-queued[0]>self.c.get('analysis_timeout_seconds',90) or queued[1]!=self.boot_id):
+            analysis['proposed_actions']=[]
+            self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier))
+            self.status(identifier,'analysis_error',{'error':'Historical assessment recorded; automatic response expired or host rebooted; manual review required'})
+            return
         if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:
             self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
         # The plan and description become durable together, before the first action.
@@ -633,11 +666,18 @@ class CorrelatedEngine:
         for identifier,created,updated,kind,subject,version in self.db.execute("SELECT id,created_at,updated_at,kind,subject,version FROM cases WHERE status='collecting'").fetchall():
             if now-updated>=self.c.get('correlation_quiet_seconds',2) or now-created>=self.c.get('correlation_max_seconds',5):
                 evidence=canonical(self.snapshot(identifier,kind,subject,version));self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,identifier));self.status(identifier,'awaiting_analysis',{'version':version,'snapshot_hash':hashlib.sha256(evidence.encode()).hexdigest()})
+        from monitoring import model_health
+        health=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),now)
         for identifier,version,evidence,updated in self.db.execute("SELECT id,version,evidence_json,updated_at FROM cases WHERE status='awaiting_analysis'").fetchall():
-            if now-updated>self.c.get('analysis_timeout_seconds',90):
-                from monitoring import model_health
-                reason=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),now)['status']
-                self.status(identifier,'analysis_error',{'error':'analysis deadline exceeded ('+reason+'); manual review required; no defense performed'})
+            reason=health['status']
+            if health.get('cap',0)>0:
+                if health['hourly_calls']>=health['cap']:reason='BUDGET EXHAUSTED'
+                elif not json.loads(evidence).get('allowed_actions') and health['hourly_calls']>=health['cap']-health.get('reserve',0):reason='RESPONSE BUDGET RESERVED'
+            self.db.execute('INSERT INTO analysis_queue VALUES (?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET version=excluded.version,queued_at=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.queued_at ELSE excluded.queued_at END,boot_id=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.boot_id ELSE excluded.boot_id END,reason=excluded.reason WHERE analysis_queue.version!=excluded.version OR analysis_queue.reason!=excluded.reason',(identifier,version,updated,self.boot_id,reason))
+            queued=self.db.execute('SELECT queued_at FROM analysis_queue WHERE case_id=?',(identifier,)).fetchone()[0]
+            self.db.commit()
+            if now-queued>max(90,min(86400,self.c.get('analysis_queue_max_age_seconds',7200))):
+                self.status(identifier,'analysis_error',{'error':'Deferred analysis expired; manual review required; no defense performed'})
                 continue
             path=pathlib.Path(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'))/f'{identifier}-v{version}.json'
             try:

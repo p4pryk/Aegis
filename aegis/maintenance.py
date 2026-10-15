@@ -10,7 +10,7 @@ import stat
 import time
 
 TABLES = ('case_events', 'case_status_history', 'case_versions', 'response_runs',
-          'response_steps', 'response_attempts', 'case_timings')
+          'response_steps', 'response_attempts', 'case_timings', 'case_parts', 'analysis_queue')
 ACTIVE = ('collecting', 'awaiting_analysis', 'recognized')
 
 

@@ -73,7 +73,8 @@ class Correlation(unittest.TestCase):
         self.chain('/user.slice/session-7.scope');row=self.awaiting();self.assertFalse(json.loads(row[2])['allowed_actions'])
     def test_no_ai_no_defense(self):
         self.chain();row=self.awaiting();self.assertEqual(self.status(row),'awaiting_analysis');self.assertFalse(self.actions)
-        self.e.tick(time.time()+100);self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
+        self.e.tick(time.time()+100);self.assertEqual(self.status(row),'awaiting_analysis');self.assertFalse(self.actions)
+        self.e.tick(time.time()+7201);self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
     def test_forged_model_action_not_authorized(self):
         self.account();row=self.awaiting();proposal=self.proposal(row,actions=[{'action':'quarantine_account','user':'lab_chain'}]);self.apply(row,proposal)
         self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)

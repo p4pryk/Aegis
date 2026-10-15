@@ -218,6 +218,11 @@ def read_snapshot(database,case_id=None):
         events=[dict(r) for r in conn.execute('SELECT * FROM observations ORDER BY rowid DESC LIMIT 60')]
         metrics=[dict(r) for r in conn.execute('SELECT * FROM sensor_metrics')]
         states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker','model_health')")}
+        for case in cases:
+            try:
+                queued=conn.execute('SELECT reason,queued_at FROM analysis_queue WHERE case_id=? AND version=?',(case['id'],case['version'])).fetchone()
+                if queued:case.update(queue_reason=queued[0],queued_at=queued[1])
+            except sqlite3.OperationalError:pass  # Older read-only recordings remain viewable.
         timing=conn.execute('SELECT t.* FROM case_timings t JOIN cases c ON c.id=t.case_id ORDER BY c.updated_at DESC LIMIT 1').fetchone()
         states['latest_timing']=dict(timing) if timing else {}
         from response_view import read_receipts

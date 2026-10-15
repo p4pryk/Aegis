@@ -106,13 +106,32 @@ def ingest(engine,event):
     recent=[engine.normalize(r[2],r[3],json.loads(r[4]),r[0],r[1]) for r in rows]
     failure=d['event']=='authentication' and d.get('outcome')=='failure'
     threshold=failure and d.get('user') and d.get('ip') and sum(e['details'].get('event')=='authentication' and e['details'].get('outcome')=='failure' and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip'] for e in recent)>=5
-    existing=engine.db.execute("SELECT id FROM cases WHERE kind='application_activity' AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(app,time.time()-120)).fetchone()
-    if not (d['review_signal'] or threshold or existing):return
-    # Prioritize explicit identifier matches. Same app/time is batch context, never an attack link.
-    related=[e for e in recent if any(d.get(key) and d[key]==e['details'].get(key) for key in ('request_id_hash','session_id_hash'))]
-    failures=[e for e in recent if e['details'].get('event')=='authentication' and d.get('user') and d.get('ip') and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip']]
-    selected={e['event_id']:e for e in [event,*related[:31],*failures[:16],*recent[:8]]}
-    engine.create_or_append('application_activity',app,event,list(selected.values())[:48])
+    # Session claims partition evidence; they never establish trusted attribution.
+    def scope(details):
+        if details.get('session_id_hash'):return 'session:'+details['session_id_hash']
+        request=details.get('request_id_hash')
+        matches={e['details']['session_id_hash'] for e in recent if request and e['details'].get('request_id_hash')==request and e['details'].get('session_id_hash')}
+        if len(matches)==1:return 'session:'+next(iter(matches))
+        if request:return 'request:'+request
+        if details.get('user'):return 'user:'+details['user']+':'+details.get('ip','')
+        return 'unattributed'
+    group=scope(d);subject=app+':'+hashlib.sha256(group.encode()).hexdigest()[:24]
+    existing=engine.db.execute("SELECT id FROM cases WHERE kind='application_activity' AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(subject,time.time()-120)).fetchone()
+    related=[e for e in recent if scope(e['details'])==group]
+    failures=[e for e in recent if e['details'].get('event')=='authentication' and e['details'].get('outcome')=='failure' and not e['details'].get('session_id_hash') and d.get('user') and d.get('ip') and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip']]
+    if not (d['review_signal'] or threshold or existing or len(failures)>=5):return
+    selected={e['event_id']:e for e in [event,*related[:26],*failures[:5]]}
+    engine.create_or_append('application_activity',subject,event,list(selected.values())[:32])
+
+def carry_context(events):
+    """Keep representative signals and recent context without growing model input."""
+    anchors={}
+    for event in events:
+        d=event['details']
+        key=('authentication',d.get('outcome')) if d.get('event')=='authentication' else ('sqli',) if d.get('sqli_signature') else (d.get('event'),)
+        if d.get('review_signal') or d.get('event')=='authentication':anchors[key]=event
+    selected={e['event_id']:e for e in [*list(anchors.values())[:6],*events[-2:]]}
+    return list(selected.values())[:8]
 
 def links(events):
     result=[];seen={};pairs=set()
