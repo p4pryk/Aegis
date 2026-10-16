@@ -246,7 +246,8 @@ class CorrelatedEngine:
             if self.db.execute('SELECT 1 FROM cases WHERE id=?',(identifier,)).fetchone():return identifier
             active=self.db.execute("SELECT count(*) FROM cases WHERE status IN ('collecting','awaiting_analysis','recognized')").fetchone()[0]
             if active>=256:
-                self.store.state('correlation_overload',{'time':now,'active_cases':active});return None
+                previous=self.store.state('correlation_overload') or {}
+                self.store.state('correlation_overload',{'time':now,'active_cases':active,'rejections':previous.get('rejections',0)+1});return None
             self.db.execute('INSERT INTO cases VALUES (?,?,?,?,?,?,?,?,?,?)',(identifier,now,now,kind,subject,0,'collecting','{}','{}','{}'));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,'collecting',now,'{}'))
         if kind=='application_activity':
             prior=self.db.execute('SELECT root_id,part FROM case_parts WHERE case_id=?',(parent,)).fetchone() if parent else None
@@ -681,7 +682,7 @@ class CorrelatedEngine:
                 continue
             path=pathlib.Path(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'))/f'{identifier}-v{version}.json'
             try:
-                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
                 with os.fdopen(fd,'r') as f:
                     info=os.fstat(f.fileno())
                     try:expected_uid=pwd.getpwnam('defense-ai').pw_uid
@@ -790,7 +791,7 @@ def serve_core(c):
         engine.tick()
         meter.add(consumed,time.monotonic()-loop_start)
         if time.time()-last_health>5:
-            last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid()})
+            last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid(),'boot_id':engine.boot_id,'analysis_window':c.get('analysis_timeout_seconds',90),'queue_window':max(90,min(86400,c.get('analysis_queue_max_age_seconds',7200)))})
             if last_health-last_audit_health>30:
                 last_audit_health=last_health
                 try:

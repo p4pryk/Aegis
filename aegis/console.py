@@ -3,6 +3,7 @@
 import argparse, datetime, json, os, re, select, shutil, signal, sys, textwrap, time, unicodedata, sqlite3
 
 from presentation import case_display, event_display, action_display
+from queue_view import lines as queue_lines, read as read_queue
 
 class Line(str):
     def __new__(cls,text,level='neutral',segments=None):
@@ -142,7 +143,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         compact=[fit('[<>] AEGIS / DEFENSE AGENT',width),fit('Enlarge the terminal window.',width)]
         return (compact+[' '*width]*height)[:max(0,height-1)]+[fit('[q] quit',width)]
     lines=logo(width)
-    if mode in ('sources','responses','review'):lines.extend(source_heading(width,{'sources':'SOURCE HEALTH','responses':'RESPONSE HISTORY','review':'REVIEW REQUIRED'}[mode]))
+    if mode in ('sources','responses','review','queue'):lines.extend(source_heading(width,{'sources':'SOURCE HEALTH','responses':'RESPONSE HISTORY','review':'REVIEW REQUIRED','queue':'ANALYSIS QUEUE'}[mode]))
     else:lines.append('='*width)
     heartbeat=data.get('heartbeat',{});healthy=0<=now-heartbeat.get('time',0)<15
     status='DATA UNAVAILABLE' if error else 'DISPLAY PAUSED' if paused else 'AGENT ONLINE' if healthy else 'CHECK AGENT'
@@ -164,12 +165,17 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
     model=data.get('model_health',{});model_status=model.get('status','MODEL UNAVAILABLE') if 0<=now-model.get('time',0)<45 else 'MODEL UNAVAILABLE'
     lines.append(Line(fit(f"Model: {model_status} | Pending: {model.get('pending','--')} | Oldest: {model.get('oldest_seconds',0):.0f}s | Calls: {model.get('hourly_calls','--')}/{model.get('cap','--')} | Reserve: {model.get('reserve','--')}",width),'neutral' if model_status in ('IDLE','ANALYZING') else 'warning'))
+    if data.get('correlation_overload'):
+        lines.append(Line(fit('CASE ENROLLMENT REFUSED — historical coverage gap; [8] queue details',width),'critical'))
     timing=data.get('latest_timing') or {}
     lines.append(fit('Last case [ms] — collect / model queue / model / result wait / response: '+ ' / '.join(str(round(timing[k])) if timing.get(k) is not None else '--' for k in ('collection_ms','model_queue_ms','model_ms','result_wait_ms','response_ms')),width))
     from monitoring import visible_sources
     sources=visible_sources(data,now)
     source_warning=any(s['status'] in ('DOWN','STALE','MISSING','GAP','LAGGING','UNKNOWN') for s in sources)
     lines.append(Line(fit('Sources: '+' | '.join(s['name'].split()[0]+' '+s['status'] for s in sources)+'  [5] details',width),'warning' if source_warning else 'healthy'))
+    if mode=='queue':
+        lines=lines[:len(logo(width))+4]
+        lines.append('-'*width)
     if mode in ('responses','review'):
         rows=data.get('responses',[])
         attention=sum(r.get('state') in ('prepared','forward_uncertain','undo_running','undo_uncertain') or (r.get('last_state')=='refused' and r.get('state')!='restored') for r in rows)+len(data.get('review_cases',[]))
@@ -179,9 +185,9 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         lines.append('-'*width)
     if error:lines.append(fit('Event store unavailable. Showing the last received state.',width))
     body_rows=max(0,height-len(lines)-2)
-    if mode in ('chain','sources','responses','review'):
+    if mode in ('chain','sources','responses','review','queue'):
         from response_view import history_lines
-        body=chain_lines(data,width,case_id) if mode=='chain' else source_lines(data,width,now) if mode=='sources' else history_lines(data,width,mode=='review')
+        body=chain_lines(data,width,case_id) if mode=='chain' else source_lines(data,width,now) if mode=='sources' else queue_lines(data,width,now) if mode=='queue' else history_lines(data,width,mode=='review')
         offset=min(max(0,offset),max(0,len(body)-body_rows))
         lines.extend((body[offset:offset+body_rows]+[' '*width]*body_rows)[:body_rows])
     elif mode=='both' and width>=100:
@@ -202,7 +208,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
         lines.extend(([fit(title,width),'-'*width]+body+[' '*width]*body_rows)[:body_rows])
     lines=lines[:max(0,height-2)]
     lines+=[' '*width]*(max(0,height-2)-len(lines))
-    lines.append('-'*width);lines.append(fit('[1-3] views [4] chain [5] sources [6] responses [7] review [j/k] scroll [q] quit',width))
+    lines.append('-'*width);lines.append(fit('[1-3] views [4] chain [5] sources [6] responses [7] review [8] queue [j/k] scroll [q] quit',width))
     return lines[:height]
 
 def read_snapshot(database,case_id=None):
@@ -217,7 +223,7 @@ def read_snapshot(database,case_id=None):
             cases.extend(dict(r) for r in conn.execute('SELECT * FROM cases WHERE id=?',(case_id,)))
         events=[dict(r) for r in conn.execute('SELECT * FROM observations ORDER BY rowid DESC LIMIT 60')]
         metrics=[dict(r) for r in conn.execute('SELECT * FROM sensor_metrics')]
-        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker','model_health')")}
+        states={r['key']:json.loads(r['value']) for r in conn.execute("SELECT * FROM state WHERE key IN ('heartbeat','sensor_health','storage_health','response_worker','model_health','correlation_overload')")}
         for case in cases:
             try:
                 queued=conn.execute('SELECT reason,queued_at FROM analysis_queue WHERE case_id=? AND version=?',(case['id'],case['version'])).fetchone()
@@ -228,7 +234,7 @@ def read_snapshot(database,case_id=None):
         from response_view import read_receipts
         reviews=[dict(r) for r in conn.execute("SELECT c.*, (SELECT details_json FROM case_status_history h WHERE h.case_id=c.id AND h.status=c.status ORDER BY h.time DESC LIMIT 1) AS review_details FROM cases c WHERE status IN ('analysis_error','defense_error') ORDER BY updated_at DESC LIMIT 201")]
         steps=[dict(r) for r in conn.execute('SELECT s.* FROM response_steps s JOIN cases c ON c.id=s.case_id ORDER BY c.updated_at DESC,s.position LIMIT 201')]
-        return {'response_steps':steps[:200],'response_steps_more':len(steps)>200,'cases':cases,'observations':events,'metrics':metrics,'review_cases':reviews[:200],'review_more':len(reviews)>200,**states,**read_receipts(database)}
+        return {'response_steps':steps[:200],'response_steps_more':len(steps)>200,'cases':cases,'observations':events,'metrics':metrics,'review_cases':reviews[:200],'review_more':len(reviews)>200,**read_queue(conn),**states,**read_receipts(database)}
     finally:conn.close()
 
 def main():
@@ -238,6 +244,7 @@ def main():
     parser.add_argument('--sources',action='store_true',help='Show collector health and source coverage')
     parser.add_argument('--responses',action='store_true',help='Show recorded response and rollback history')
     parser.add_argument('--review',action='store_true',help='Show incidents and actions requiring manual review')
+    parser.add_argument('--queue',action='store_true',help='Show the complete bounded analysis backlog')
     args=parser.parse_args();data={};error=None
     try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,args.case)
     except (OSError,ValueError,sqlite3.Error):error=True
@@ -248,10 +255,13 @@ def main():
             from response_view import history_lines
             output=logo(width)+source_heading(width,'REVIEW REQUIRED' if args.review else 'RESPONSE HISTORY')+history_lines(data,width,args.review)
             if error:output+=wrapped('Event store unavailable; review coverage is incomplete.',width,'critical')
+        if args.queue:
+            output=logo(width)+source_heading(width,'ANALYSIS QUEUE')+queue_lines(data,width,time.time())
+            if error:output+=wrapped('Event store unavailable; queue coverage is incomplete.',width,'critical')
         print('\n'.join(line.rstrip() for line in output))
         return
     import termios,tty
-    original=termios.tcgetattr(sys.stdin);paused=False;mode='review' if args.review else 'responses' if args.responses else 'sources' if args.sources else 'chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
+    original=termios.tcgetattr(sys.stdin);paused=False;mode='queue' if args.queue else 'review' if args.review else 'responses' if args.responses else 'sources' if args.sources else 'chain' if args.case else 'both';selected=args.case;offset=0;next_poll=time.monotonic()+1;previous=None
     def stop(signum,frame):raise KeyboardInterrupt
     old_signal=signal.signal(signal.SIGTERM,stop)
     try:
@@ -272,15 +282,15 @@ def main():
                 key=os.read(sys.stdin.fileno(),1)
                 if key in (b'q',b'Q',b'\x03',b'\x04'):break
                 if key==b' ':paused=not paused
-                if key in (b'1',b'2',b'3',b'4',b'5',b'6',b'7'):
-                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain',b'5':'sources',b'6':'responses',b'7':'review'}[key];offset=0
+                if key in (b'1',b'2',b'3',b'4',b'5',b'6',b'7',b'8'):
+                    mode={b'1':'both',b'2':'events',b'3':'cases',b'4':'chain',b'5':'sources',b'6':'responses',b'7':'review',b'8':'queue'}[key];offset=0
                     if mode=='chain' and not selected:selected=next((c['id'] for c in data.get('cases',[])),None)
                 if mode=='chain' and key in (b'n',b'p'):
                     ids=[c['id'] for c in sorted(data.get('cases',[]),key=lambda c:c.get('updated_at',0),reverse=True)]
                     if ids:selected=ids[((ids.index(selected) if selected in ids else 0)+(1 if key==b'n' else -1))%len(ids)];offset=0
-                if mode in ('chain','sources','responses','review') and key in (b'j',b'k'):
+                if mode in ('chain','sources','responses','review','queue') and key in (b'j',b'k'):
                     from response_view import history_lines
-                    body=chain_lines(data,width,selected) if mode=='chain' else source_lines(data,width,time.time()) if mode=='sources' else history_lines(data,width,mode=='review')
+                    body=chain_lines(data,width,selected) if mode=='chain' else source_lines(data,width,time.time()) if mode=='sources' else queue_lines(data,width,time.time()) if mode=='queue' else history_lines(data,width,mode=='review')
                     offset=max(0,min(len(body)-1,offset+(3 if key==b'j' else -3)))
             if not paused and time.monotonic()>=next_poll:
                 try:data=json.loads(open(args.data_file).read()) if args.data_file else read_snapshot(args.database,selected);error=None
