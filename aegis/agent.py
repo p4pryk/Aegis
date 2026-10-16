@@ -745,6 +745,8 @@ def serve_core(c):
     from file_logs import Files
     from application_sources import Applications
     applications=Applications(engine)
+    from coverage_check import Probe
+    coverage_probe=Probe(c)
     mode,paths,journal_available=discover(c)
     files=Files(engine,paths) if c.get('system_logs_enabled',True) and mode=='files' else None
     reader_config=dict(c,_system_source_mode=mode)
@@ -820,6 +822,7 @@ def serve_core(c):
                 'categories':['Authentication / PAM','Accounts / groups','Sudo / su','Cron / timers','Service transitions','AppArmor / SELinux denials','Kernel OOM / process faults'],
                 'limitations':'Selected formats only; file records cannot prove kernel session/process identity. Process execution remains scoped to configured audit rules.',
                 'enabled':c.get('system_logs_enabled',True),'journal_counts':getattr(engine,'system_log_counts',{})}
+            health['coverage_check']=coverage_probe.poll(health,last_health)
             store.state('sensor_health',health)
             pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
         if consumed==0:time.sleep(.02)

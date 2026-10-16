@@ -14,7 +14,7 @@ The gallery was refreshed on **2026-10-14**. All six views use the same shields,
 | `2` | Events | Normalized observations from the configured collectors. |
 | `3` | Assessments | Incident summaries and recorded response outcomes. |
 | `4` | Incident chain | Chronological evidence, explicit links and the response gate. |
-| `5` | Source Health | Source availability, parser coverage, backlog and application adapters. |
+| `5` | Source Health | Coverage gaps, discovered services, source availability and parser diagnostics. |
 | `6` | Response History | Recorded containment and rollback outcomes. |
 | `7` | Review Required | Uncertain operations, refused rollback and failed assessments. |
 | `8` | Analysis Queue | Full bounded backlog, wait reasons and response timing limits. |
@@ -294,7 +294,7 @@ Run `sudo python3 aegis/live-rollback-tests.py` only on the isolated VM after in
 python3 -m unittest discover -s aegis/tests -q
 ```
 
-The unit suite covers correlation, response safety, collector health and model scheduling. `aegis/live-queue-tests.py` checks the installed read-only viewer against the live database and a separate temporary 55-case fixture, including a bounded subprocess test for FIFO result rejection; it never inserts fixture cases into the live database. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. `aegis/live-telemetry-tests.py` opens real SSH sessions, performs an inert group/file-change sequence and checks session isolation, terminal explanations and restart retention. `aegis/live-prompt-tests.py` uses the real model against baseline and adversarial evidence with a recording executor, so it does not perform defensive side effects. Stop `defense-agent-ai` for that script and restart it afterwards; it reserves calls against the existing hourly budget and spacing without resetting counters. Run those scripts as root, one at a time, **only on the isolated training VM**. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
+The unit suite covers correlation, response safety, collector health and model scheduling. `aegis/live-queue-tests.py` checks the installed read-only viewer against the live database and a separate temporary 55-case fixture, including a bounded subprocess test for FIFO result rejection; it never inserts fixture cases into the live database. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. `aegis/live-telemetry-tests.py` opens real SSH sessions, performs an inert group/file-change sequence and checks session isolation, terminal explanations and restart retention. `aegis/live-prompt-tests.py` uses the real model against baseline and adversarial evidence with a recording executor, so it does not perform defensive side effects. Stop `defense-agent-ai` for that script and restart it afterwards; it reserves calls against the existing hourly budget and spacing without resetting counters. Run those scripts as root, one at a time, **only on the isolated training VM**. Leave at least 11 seconds between suites that repeatedly restart the core; the default systemd limit is five starts in ten seconds. If diagnostics confirm `start-limit-hit`, clear that failed state and restore the service before retrying; do not weaken the service limit. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period. Model starts remain at least eight seconds apart with a default budget of 40 attempted calls per UTC clock hour, including failed attempts. Ten calls are reserved for cases with a locally verified action catalog: ordinary analyses stop at 30, while eligible response chains may use the full 40. Configure `max_calls_per_hour`, `response_reserve_calls` and `min_call_interval_seconds` in `ai.json`; existing explicit caps are preserved, and an omitted reserve defaults to the smaller of ten or one quarter of the cap. Counters and retry state survive worker restarts; hourly reset preserves call spacing and provider cooldown. A provider throttle pauses all cases and honors `Retry-After`.
 
@@ -330,11 +330,36 @@ Press **5** or start the console with `--sources`. The fixed header includes a c
 | `STALE` | Core health is older than 15 seconds; last-known source status is not current. |
 | `UNKNOWN` | No source-health snapshot is available yet. |
 
+The **COVERAGE CHECK** at the top is a configuration inventory, refreshed every 60 seconds by one background worker. It inspects fixed service-name/path hints for Nginx, Apache, PostgreSQL, MySQL/MariaDB, Redis and container runtimes, plus up to eight explicitly configured application files. It checks selected audit rule keys and current collector configuration. Commands have three-second timeouts; slow discovery does not block intake or spawn overlapping workers. Inventory older than 120 seconds, or a stale core heartbeat, is shown as unknown.
+
+| Coverage state | Meaning |
+| --- | --- |
+| `READY` | Collector was alive at the inventory snapshot; this does not prove complete parsing. |
+| `CONFIGURED` | An explicit file adapter exists; no successfully parsed records are yet confirmed in this collector session. |
+| `OBSERVED` | The configured adapter has parsed selected records; unrelated event types may still be absent. |
+| `NEEDS CONFIG` | A known service/default-path hint was detected without a matching explicit file adapter. Custom paths require manual review. |
+| `PARTIAL` | Some matching adapters exist; other virtual hosts, database streams or application events may still be missing. |
+| `FORMAT REVIEW` | Invalid or unrecognized records were reported; inspect the producer format and mapping. |
+| `MISSING` / `UNSAFE` | A configured file is absent, not regular, has an unexpected owner or allows group/world writes. |
+| `KEYS PRESENT` / `RULES MISSING` | Selected audit keys exist or are absent. Key presence does not validate the exact syscall filters or watched paths. |
+| `UNKNOWN` | Inventory, metadata or current health could not be established. |
+
+Discovery reads service properties, audit rule metadata and file metadata only. It never reads additional log contents, scans directories recursively, installs software or enables sources. Service journals do not establish HTTP access, database query/audit or container application coverage. Native database/runtime formats need supported exports or new parsers. Custom service names, virtual-host paths, remote logging and unknown applications remain outside automatic discovery; there is no claim of coverage of every Linux application. Collector state below the inventory remains sampled every five seconds; a quiet configured source is distinct from a missing source.
+
+`aegis/live-coverage-tests.py` checks the installed background report and real inventory commands, then exercises temporary file adapters through missing, quiet, observed, invalid-format and unsafe states without altering live source configuration.
+
 Health is sampled every five seconds; the kernel audit status probe runs every 30 seconds. Process checks include PID birth identity and detect a stopped process even when its pipe still exists. The application checks the HTTP service and broker as well as the file reader; application backlog delay is the duration of a nonempty byte backlog. Cursor/file gaps remain warnings after recovery, including core restarts. A running collector does not prove every service emits logs: this screen describes the configured sources, not all logs on the machine. It is local status only, without an external heartbeat or alerts.
 
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-10-16 — Configuration coverage inventory
+
+- Add metadata-only coverage checks to Source Health for known service/default-path hints, configured file adapters and selected audit rule keys; distinguish configured, observed, missing, unsafe, partial and unsupported-format evidence.
+- Run discovery in one background worker every 60 seconds. Stale/unavailable inventory remains unknown; collection never waits for discovery, and no source is automatically enrolled.
+- Explain specific gaps without claiming that service journals, quiet files or audit-key presence establish complete application coverage.
+- Validation: all 239 tests passed on the Azure Linux VM without skips. Live checks passed: 13 coverage checks, 15 system-source checks, eight collection/recovery checks and 17 SQL/account response checks, including real HTTP blocking. Consecutive restart-heavy suites initially hit the unchanged systemd five-starts/ten-seconds limit; diagnostics confirmed `start-limit-hit`, the service was restored, and operations/response suites passed with pacing between runs. Local suite: 233 passed, six Linux/root-only checks skipped.
 
 ### 2026-10-16 — Analysis queue visibility and collector resilience
 

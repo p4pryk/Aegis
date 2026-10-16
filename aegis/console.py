@@ -105,7 +105,9 @@ def source_heading(width,title="SOURCE HEALTH"):
 
 def source_lines(data,width,now):
     from monitoring import visible_sources
-    lines=[]
+    from coverage_check import lines as coverage_lines
+    health=data.get('sensor_health',{})
+    lines=coverage_lines(health.get('coverage_check',{}),width,now,0<=now-health.get('time',0)<15)+['-'*width]
     for source in visible_sources(data,now):
         status=source['status'];level='critical' if status in ('DOWN','STALE','MISSING') else 'warning' if status in ('GAP','LAGGING','UNKNOWN') else 'healthy' if status in ('LIVE','QUIET') else 'neutral'
         marker='[OK]' if status in ('LIVE','QUIET') else '[--]' if status=='DISABLED' else '[!!]'
