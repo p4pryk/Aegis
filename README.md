@@ -408,6 +408,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-08 — Preserve review items across incident types
+
+- Keep REVIEW REQUIRED assessments for SSH and other non-continuation cases when new evidence arrives. Create a separate case for genuinely new evidence, including evidence discovered through enrichment; duplicate input does not create a new case.
+- Validation: 52 focused tests and eight live SSH/session checks passed on the Azure Linux VM. The local full suite passed 254 tests, with six Linux/root-only tests skipped.
+
 ### 2026-11-08 — Collector continuity and incident integrity
 
 - Require fresh collector and audit health when sampling continuity; flag collector restarts and any increase or reset of loss counters instead of treating missing data as zero.

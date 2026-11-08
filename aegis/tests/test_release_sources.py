@@ -7,6 +7,22 @@ from unittest.mock import Mock,patch
 import agent, application_sources, history_context, journal_sources, system_sources
 
 class ReleaseSources(unittest.TestCase):
+    def test_non_continuation_review_survives_new_event_and_enrichment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config=dict(agent.DEFAULTS,data_dir=directory,response_mode='review')
+            store=agent.Store(config);engine=agent.CorrelatedEngine(config,store,None)
+            first=engine.normalize('ssh_failure','192.0.2.7',{},'first',time.time())
+            original=engine.create_or_append('ssh_threshold','192.0.2.7',first)
+            store.db.execute("UPDATE cases SET status='review_required',analysis_json=? WHERE id=?",(json.dumps({'summary':'review this'}),original));store.db.commit()
+            self.assertEqual(engine.create_or_append('ssh_threshold','192.0.2.7',first),original)
+            extra=engine.normalize('ssh_success','192.0.2.7',{},'later-context',time.time())
+            followup=engine.create_or_append('ssh_threshold','192.0.2.7',first,[extra])
+            self.assertNotEqual(followup,original)
+            self.assertEqual(store.db.execute('SELECT status FROM cases WHERE id=?',(original,)).fetchone()[0],'review_required')
+            self.assertEqual(json.loads(store.db.execute('SELECT analysis_json FROM cases WHERE id=?',(original,)).fetchone()[0])['summary'],'review this')
+            self.assertIn('later-context',[event['event_id'] for event in engine.events(followup)])
+            store.db.close()
+
     def test_new_evidence_does_not_reopen_superseded_case(self):
         with tempfile.TemporaryDirectory() as directory:
             config=dict(agent.DEFAULTS,data_dir=directory)

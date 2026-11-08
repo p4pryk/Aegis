@@ -228,9 +228,14 @@ class CorrelatedEngine:
         if case_id:
             row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
             if not row:return None
-        parent=None
+        parent=None;identity_event=event
         continuation_kind=kind in ('application_activity','host_change','system_activity')
         part_limit=32 if kind=='application_activity' else 64
+        if row and not continuation_kind and self.db.execute('SELECT status FROM cases WHERE id=?',(row[0],)).fetchone()[0]=='review_required':
+            fresh=next((e for e in [event,*extra] if not self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(row[0],e['event_id'])).fetchone()),None)
+            if fresh:
+                identity_event=fresh
+                row=None
         if continuation_kind and row:
             identifier=row[0]
             if kind=='application_activity' and self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
@@ -247,7 +252,7 @@ class CorrelatedEngine:
                 from application_sources import carry_context
                 extra=carry_context(previous)
                 row=None
-        identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+event['event_id']).encode()).hexdigest()[:24]
+        identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+identity_event['event_id']).encode()).hexdigest()[:24]
         if not row:
             # Enrichment can revisit the same account after containment. Keep the
             # immutable completed case instead of inserting its deterministic ID again.
@@ -264,7 +269,7 @@ class CorrelatedEngine:
             root=self.db.execute('SELECT root_id FROM case_parts WHERE case_id=?',(identifier,)).fetchone()[0]
             extra=[e for e in extra if not self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE e.event_id=? AND p.root_id=? AND p.case_id!=? LIMIT 1',(e['event_id'],root,identifier)).fetchone()]
         changed=False
-        for e in ([event,*extra] if continuation_kind else [*extra,event]):
+        for e in ([event,*extra] if continuation_kind else [identity_event,*extra,event] if identity_event is not event else [*extra,event]):
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
             if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
