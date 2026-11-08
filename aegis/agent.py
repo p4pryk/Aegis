@@ -2,7 +2,7 @@
 """Local policy engine. No model output is executable input."""
 from contextlib import contextmanager
 from policy import account_allowed, require_enforce
-import argparse, collections, signal, grp, hashlib, ipaddress, json, os, pathlib, pwd, re, socket, sqlite3, stat, struct, subprocess, threading, time
+import argparse, collections, signal, grp, hashlib, ipaddress, json, math, os, pathlib, pwd, re, socket, sqlite3, stat, struct, subprocess, threading, time
 
 JOURNAL_HEALTH = {'dropped_events':0,'connected':False}
 JOURNAL_CONTEXT_HEALTH = {'dropped_events':0,'connected':False}
@@ -23,6 +23,17 @@ def safe_ip(value, config):
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         return safe_ip(str(ip.ipv4_mapped), config)
     return str(ip)
+
+def ssh_spray_signal(events,ip):
+    failures=[]
+    for event in events:
+        details=event.get('details',{});user=details.get('user');stamp=event.get('event_time')
+        if event.get('kind')=='ssh_failure' and details.get('ip')==ip and isinstance(user,str) and re.fullmatch(r'[A-Za-z0-9_.@-]{1,64}',user) and type(stamp) in (int,float) and math.isfinite(stamp):
+            failures.append((stamp,user.casefold()))
+    if not failures:return []
+    latest=max(stamp for stamp,_ in failures)
+    accounts={user for stamp,user in failures if 0<=latest-stamp<=120}
+    return [dict(kind='possible_ssh_password_spray',distinct_accounts=len(accounts),window_seconds=120)] if len(accounts)>=5 else []
 
 def trusted_file(path):
     s = os.lstat(path)
@@ -551,6 +562,7 @@ class CorrelatedEngine:
                     if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
     def snapshot(self,identifier,kind,subject,version):
         events=self.events(identifier);allowed=[];required=[];edges=[]
+        signals=ssh_spray_signal(events,subject) if kind=='ssh_threshold' else []
         if kind=='app_sql_persistence':
             from persistence import plan
             allowed,required,edges=plan(events,self.c,self.boot_id)
@@ -622,7 +634,7 @@ class CorrelatedEngine:
         part=self.db.execute('SELECT root_id,parent_id,part FROM case_parts WHERE case_id=?',(identifier,)).fetchone()
         from history_context import summarize
         history=summarize(self.db,identifier) if part else None
-        return {'history_context':history,'continuation':dict(root_id=part[0],parent_id=part[1],part=part[2]) if part else None,'version':version,'events':events,'edges':edges,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'response_mode':self.c.get('response_mode','observe'),'account_scope':'explicit local account scope; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved scoped local account creation; prior failures additionally required for dedicated IP block'}}
+        return {'history_context':history,'continuation':dict(root_id=part[0],parent_id=part[1],part=part[2]) if part else None,'version':version,'events':events,'edges':edges,'signals':signals,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'response_mode':self.c.get('response_mode','observe'),'account_scope':'explicit local account scope; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved scoped local account creation; prior failures additionally required for dedicated IP block'}}
     def validate_result(self,row,result):
         identifier,version,evidence=row;data=json.loads(evidence)
         if not isinstance(result,dict) or result.get('case_id')!=identifier or type(result.get('version')) is not int or result['version']!=version or result.get('snapshot_hash')!=hashlib.sha256(evidence.encode()).hexdigest():raise ValueError('stale version or snapshot hash')

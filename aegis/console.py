@@ -68,6 +68,9 @@ def case_lines(data,width):
         title=view['kind_label']+((': '+str(focus)) if focus else '')
         lines.extend(wrapped(MARKERS[view['level']]+' '+stamp(case.get('updated_at'))+' ['+view['label']+'] '+str(title),width,view['level']))
         lines.extend(wrapped(view['status_label'],width,view['level']))
+        for signal in evidence.get('signals',[]):
+            if isinstance(signal,dict) and signal.get('kind')=='possible_ssh_password_spray' and type(signal.get('distinct_accounts')) is int and 5<=signal['distinct_accounts']<=256:
+                lines.extend(wrapped('[!] Possible SSH password spraying: '+str(signal['distinct_accounts'])+' accounts in 120s; investigate.',width,'warning'))
         if login:
             d=login.get('details',{});lines.extend(wrapped('SSH '+str(d.get('user','--'))+' @ '+str(d.get('ip','--'))+' / session '+str(d.get('session','--')),width))
         lines.extend(wrapped('Case: '+str(case.get('id','--'))+' / Evidence: '+str(len(evidence.get('events',[])))+' / links: '+str(len(evidence.get('edges',[]))),width))

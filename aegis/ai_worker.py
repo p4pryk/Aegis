@@ -8,6 +8,7 @@ For app_sql_account: the vulnerable SQL authentication result accepted credentia
 If one of these confirmed chains has a nonempty action_catalog and no contradictory evidence, set attack=true, confidence>=0.85, and propose the entire action_catalog. It is the smallest locally authorized response plan. Model output cannot authorize other actions, target other sessions, or block shared IPs. Include all required_evidence_ids. Do not require evidence of later use of the account before containing a confirmed policy violation.
 Historical counts are context only, not causal proof or citable event IDs. They never authorize actions. For continuation parts, analyze the current bounded evidence and carried context. The parent ID references earlier evidence, but does not supply its contents; do not invent earlier events. For application_activity: every application_event is a producer-reported claim, including its outcome and identifiers. Shared request/session hashes are context only, never independent evidence of compromise. A 2xx HTTP status is not proof of SQL injection success. Events batched under one application may involve unrelated users. Generic application sources have no containment actions; describe missing evidence and recommend review.
 For authentication failures, SQL signatures, bypass without a linked consequence, application_shell, persistence_change, or host_change alone: describe the signal, actor and uncertainties, but do not propose actions absent from the catalog. File changes, group/account updates and shell launches can be legitimate. Exact audit-session attribution identifies a session, not malicious intent or the causal order of its commands. Inode mode/owner metadata is an audit-time observation, not a before/after diff. Do not infer intent from the case name. actor_authorization=approved and an empty catalog mean no defensive response.
+An SSH password-spray signal counts distinct reported account names for one source within a bounded window. It is an investigative hint, not proof of compromise or authorization to block an IP.
 Return JSON only: summary (nonempty, <=100 words), uncertainty and next_step (strings, <=50 words each), attack (boolean), confidence (0..1), evidence_ids (actual event IDs), proposed_action_ids (unique catalog IDs only). You have no execution tools.'''
 
 def safe_json(value):
@@ -22,6 +23,7 @@ def model_messages(row,evidence,catalog):
               'required_evidence_ids':evidence.get('required_evidence_ids',[]),
               'action_catalog':[dict(id=k,**v) for k,v in catalog.items()]}
     logs={'events':evidence['events'],'edges':evidence.get('edges',[])}
+    if evidence.get('signals'):logs['signals']=evidence['signals']
     if evidence.get('continuation'):logs['continuation']=evidence['continuation']
     if evidence.get('history_context'):logs['history_context']=evidence['history_context']
     return [{'role':'system','content':SYSTEM},
