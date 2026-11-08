@@ -224,7 +224,7 @@ class CorrelatedEngine:
     def create_or_append(self,kind,subject,event,extra=(),case_id=None):
         now=time.time()
         context_seconds=max(120,min(3600,int(self.c.get('incident_context_seconds',3600)))) if kind in ('application_activity','host_change','system_activity') else 120
-        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-context_seconds)).fetchone()
+        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error','superseded') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-context_seconds)).fetchone()
         if case_id:
             row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
             if not row:return None

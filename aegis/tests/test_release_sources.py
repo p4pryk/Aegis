@@ -7,6 +7,19 @@ from unittest.mock import Mock,patch
 import agent, application_sources, history_context, journal_sources, system_sources
 
 class ReleaseSources(unittest.TestCase):
+    def test_new_evidence_does_not_reopen_superseded_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config=dict(agent.DEFAULTS,data_dir=directory)
+            store=agent.Store(config);engine=agent.CorrelatedEngine(config,store,None)
+            first=engine.normalize('persistence_change','path',{},'first',time.time())
+            original=engine.create_or_append('persistence_change','path',first)
+            engine.status(original,'superseded',{'linked_case':'confirmed'});store.db.commit()
+            second=engine.normalize('persistence_change','path',{},'second',time.time())
+            followup=engine.create_or_append('persistence_change','path',second)
+            self.assertNotEqual(original,followup)
+            self.assertEqual(store.db.execute('SELECT status FROM cases WHERE id=?',(original,)).fetchone()[0],'superseded')
+            self.assertIn('second',[event['event_id'] for event in engine.events(followup)])
+            store.db.close()
     def test_new_evidence_preserves_existing_review_and_starts_next_part(self):
         with tempfile.TemporaryDirectory() as directory:
             config=dict(agent.DEFAULTS,data_dir=directory,response_mode='review')

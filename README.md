@@ -408,6 +408,12 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-08 — Collector continuity and incident integrity
+
+- Require fresh collector and audit health when sampling continuity; flag collector restarts and any increase or reset of loss counters instead of treating missing data as zero.
+- Keep superseded incidents closed when later events arrive, while opening a separate case for new evidence.
+- Validation: 18 focused tests and all 17 live SQL/application checks passed on the Azure Linux VM. A 15-second continuity sample passed; this short run is not a soak test. The local full suite passed 253 tests, with six Linux/root-only tests skipped.
+
 ### 2026-11-08 — Linux release candidate hardening
 
 - Preserve existing REVIEW REQUIRED assessments when later events arrive by starting a linked continuation instead of clearing the review.
