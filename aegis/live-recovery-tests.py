@@ -61,7 +61,7 @@ def main():
             f.write(content)
         path.chmod(0o644)
         with tempfile.TemporaryDirectory(prefix='aegis-recovery-') as directory:
-            config = dict(agent.DEFAULTS, data_dir=directory)
+            config = dict(agent.DEFAULTS, response_mode='enforce', lab_response_enabled=True, data_dir=directory)
             store = agent.Store(config)
             engine = agent.CorrelatedEngine(config, store, agent.Executor(config).execute)
             event = engine.normalize('account_created', user, {'account_uid': pwd.getpwnam(user).pw_uid}, 'recovery-fixture', time.time())

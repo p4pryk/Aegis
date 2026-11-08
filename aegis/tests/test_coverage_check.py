@@ -5,7 +5,7 @@ import coverage_check as coverage,console
 
 class Coverage(unittest.TestCase):
     def setUp(self):
-        self.facts=dict(services={},services_available=True,rules=['lab_root_exec','aegis_identity','aegis_persistence'])
+        self.facts=dict(services={},services_available=True,rules=['lab_root_exec','aegis_session_exec','aegis_identity','aegis_persistence'])
         self.health=dict(time=100,sources=[dict(name=n,status='QUIET',reason='Alive; quiet') for n in ('Kernel audit','SSH journal','Service journal')],system_log_coverage=dict(mode='journal',enabled=True))
     def assess(self,c=None,files=None):
         return coverage.assess(c or {},self.health,self.facts,lambda p:(files or {}).get(p,{'kind':'missing'}),100)

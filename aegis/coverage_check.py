@@ -52,7 +52,7 @@ def assess(config,health,facts,inspect=metadata,now=None):
         for category,path in system.get('paths',{}).items():
             source=next((s for s in sources.values() if s.get('path')==path),{})
             add(category+' system file',source.get('status','UNKNOWN'),path,source.get('reason','Check that this selected source is readable and emits supported records.'))
-    required=['lab_root_exec','aegis_identity']+(['aegis_persistence'] if config.get('persistence_enabled',False) else [])
+    required=['lab_root_exec','aegis_session_exec','aegis_identity']+(['aegis_persistence'] if config.get('persistence_enabled',False) else [])
     keys=facts.get('rules')
     missing=[key for key in required if keys is not None and key not in keys]
     add('Selected audit rules','UNKNOWN' if keys is None else 'RULES MISSING' if missing else 'KEYS PRESENT',

@@ -1,7 +1,7 @@
 """Selected Linux system events. Text is evidence, never trusted process identity."""
 import datetime, hashlib, ipaddress, os, pathlib, re, shutil, time
 
-IDENTIFIERS=('login','sshd','sshd-session','sudo','su','su-l','passwd','chpasswd','useradd','userdel','usermod','groupadd','groupdel','groupmod','gpasswd','cron','CRON','crond','CROND','systemd','kernel')
+IDENTIFIERS=('login','sshd','sshd-session','sudo','su','su-l','passwd','chpasswd','useradd','userdel','usermod','groupadd','groupdel','groupmod','gpasswd','cron','CRON','crond','CROND','systemd','kernel','auditd','polkitd','pkexec','docker','containerd')
 PATHS={'auth':('/var/log/auth.log','/var/log/secure'),'system':('/var/log/syslog','/var/log/messages'),'kernel':('/var/log/kern.log',),'cron':('/var/log/cron',)}
 
 def family(program):
@@ -81,6 +81,13 @@ def parse(program,message,stamp,event_id,source,boot_id=None,metadata=None):
             kind='system_resource_failure';review=True;description='Kernel memory exhaustion or OOM termination reported.'
         elif re.search(r'\bsegfault at\b',msg):
             kind='system_process_fault';review=True;description='Kernel process fault reported; cause is unconfirmed.'
+    if kind is None and program=='auditd' and re.search(r'abort|lost|backlog|disk.*(?:full|low)|suspend|terminat',msg,re.I):
+        kind='system_sensor_failure';review=True;description='Audit service reports a collection or availability problem.'
+    if kind is None and program=='kernel' and re.search(r'module verification failed|loading out-of-tree module|Lockdown:|nf_tables.*(?:error|fail)',msg,re.I):
+        kind='system_kernel_security';review=True;description='Kernel integrity or security configuration warning reported; compromise is unconfirmed.'
+    if kind is None and metadata and str(metadata.get('PRIORITY','')) in ('0','1','2','3','4'):
+        kind='system_warning';review=True;description='Service warning/error reported; cause requires application-specific telemetry.'
+        details.update(priority=int(metadata['PRIORITY']),message_hash=hashlib.sha256(msg.encode()).hexdigest())
     if kind is None:return None
     details.update(category=family(program),review_signal=review)
     return {'event_id':event_id,'event_time':stamp,'kind':kind,'subject':subject,'details':details,'description':description}

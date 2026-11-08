@@ -2,6 +2,7 @@
 Description=AEGIS read-only AI analyst
 After=network-online.target defense-agent.service
 Wants=network-online.target
+ConditionPathExists=/etc/defense-agent/ai.json
 [Service]
 User=defense-ai
 Group=defense-ai
@@ -10,6 +11,11 @@ Restart=always
 RestartSec=3
 UMask=0027
 NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

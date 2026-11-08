@@ -5,7 +5,7 @@ import agent as a
 
 class Correlation(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.c=a.DEFAULTS.copy();self.c.update(data_dir=self.tmp.name,ai_results_dir=self.tmp.name,protected_ips=['203.0.113.1'])
+        self.tmp=tempfile.TemporaryDirectory();self.c=a.DEFAULTS.copy();self.c.update(trust_account_creators=True,response_mode='enforce',lab_response_enabled=True,data_dir=self.tmp.name,ai_results_dir=self.tmp.name,protected_ips=['203.0.113.1'])
         self.store=a.Store(self.c);self.actions=[]
         def execute(request):
             row=self.store.db.execute('SELECT status,analysis_json FROM cases ORDER BY updated_at DESC LIMIT 1').fetchone()

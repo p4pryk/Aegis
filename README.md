@@ -4,6 +4,7 @@ AEGIS is a small, always-on Linux VM security prototype. It collects selected ke
 
 This repository contains an intentionally vulnerable application for an **isolated training VM**. The application listens on port 8081; keep inbound access to that port closed in the cloud firewall and use an SSH tunnel for exercises.
 
+
 ## Terminal gallery
 
 The gallery was refreshed on **2026-10-14**. All six views use the same shields, separators and color scheme. Overview, events, chain and sources are rendered by the current console from selected real VM test data recorded on October 14. The event panels replay normalized events retained in that incident because the live event window had already advanced. Response history and review show archived terminal frames from October 13; their layout remains current. These are recorded examples, not the present state of a running VM.
@@ -42,7 +43,11 @@ Shared request/session identifiers provide application-reported context. This te
 <details>
 <summary><strong>Source Health [5]</strong> — system coverage and independent application adapters</summary>
 
-The frame was recorded after a collector restart. The application sources are quiet because previously consumed records were checkpointed; zero counters refer to the new collector session.
+Current coverage frame recorded on October 17 after release acceptance. The isolated demo uses Enforce; an ordinary installation defaults to Observe. The model reached its 30-call ordinary-analysis allowance, preserving ten calls for response-eligible chains. Collection continued without reported audit loss.
+
+![AEGIS current source health, policy and model budget](aegis/assets/source-health-current.png)
+
+The older adapter-focused frame below was recorded after a collector restart; its zero counters refer to that collector session.
 
 ![AEGIS source coverage and JSONL/access-log adapters](aegis/assets/application-sources.png)
 
@@ -76,7 +81,7 @@ flowchart LR
     I --> C[Normalize and correlate]
     J[SSH and selected journald sources] --> C
     B[Configured application JSONL / access logs] --> C
-    F[System log files] --> C
+    SF[System log files] --> C
     T[Optional training app telemetry] --> C
     C --> D[Evidence case: events and causal links]
     D --> E[Bounded model assessment]
@@ -88,9 +93,9 @@ flowchart LR
     G --> H
 ```
 
-The sensors observe SSH authentication and sessions, root and application process launches, Linux account creation and successful account/group management records, the training app's SQL authentication outcome, and changes to `authorized_keys`, cron and systemd files (including user crontabs, service drop-ins, enablement links and timer files). Identity and permission watches cover `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, `/etc/sudoers` and `/etc/sudoers.d`; only audit metadata is retained, never their contents. A bounded journald reader also captures `sudo`/`su`, system service transitions, and access logs from configured web-service units (the AEGIS target and Nginx/Apache by default). Web access parsing stores method, path and status; query strings, headers and raw log messages are discarded. The training app emits a structured access record with a server-generated request ID that is also carried through broker and application telemetry, so those records join exactly. Other web-server logs are contextual unless they propagate the same request ID. Configure `journal_comms`, `journal_identifiers` and `journal_units` in `/etc/defense-agent/config.json` to select sources available on your host. A web server must send access logs to journald for this reader to see them.
+The sensors observe SSH authentication and sessions, root, audited login-session and configured application process launches, Linux account creation and successful account/group management records, the training app's SQL authentication outcome, and changes to `authorized_keys`, cron and systemd files (including user crontabs, service drop-ins, enablement links and timer files). Identity and permission watches cover `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, `/etc/sudoers` and `/etc/sudoers.d`; only audit metadata is retained, never their contents. A bounded journald reader also captures `sudo`/`su`, system service transitions, and access logs from configured web-service units (the AEGIS target and Nginx/Apache by default). Web access parsing stores method, path and status; query strings, headers and raw log messages are discarded. The training app emits a structured access record with a server-generated request ID that is also carried through broker and application telemetry, so those records join exactly. Other web-server logs are contextual unless they propagate the same request ID. Configure `journal_comms`, `journal_identifiers` and `journal_units` in `/etc/defense-agent/config.json` to select sources available on your host. A web server must send access logs to journald for this reader to see them.
 
-This is an **explicitly configured set of sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; each core loop drains up to 100 journal records, 100 durable audit records and 100 application records. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows journal backpressure waits and reported cursor gaps.
+This is a **bounded set of default and configured sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; each core loop drains up to 100 journal records, 100 durable audit records and 100 application records. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows journal backpressure waits and reported cursor gaps.
 
 Host-change and persistence cases are revisited once per second after batched intake. Matching boot ID, audit session and login UID bring SSH, sudo, process and file metadata into the same case, including delayed records received within the ten-minute window. Enrichment considers at most 2,048 recent relevant records and adds up to 32 matching context events per pass. Process-level links additionally require matching PID birth time; a reused PID cannot supply that link. Same-session attribution is labelled separately from causality and does not grant a response. Relative file names require a CWD from the same audit event, with partial assembly retained across core restarts. Account/group and permission changes without an existing confirmed response chain remain review-only cases.
 
@@ -148,6 +153,55 @@ sudo python3 /opt/defense-agent/maintenance.py CASE_ID --output /secure/path/inc
 ```
 
 The export includes the case, normalized evidence, assessment history, response attempts and timings, creates a private file, and refuses to overwrite an existing path. Automatic retention is not an off-VM archive.
+
+## Release candidate: Linux deployment contract
+
+This working release targets **Ubuntu 24.04, x86_64, systemd**. Full model-backed validation currently uses the Azure VM and its managed identity. Other distributions are not yet validated; the installer refuses them before modifying the host. AEGIS does not detect every attack or read every possible log. Its coverage inventory, source health and queue warnings describe the limits of the available evidence. Arbitrary application business logic, encrypted payloads, nonstandard log formats and container-internal events require additional instrumentation.
+
+The ordinary installation defaults to **Observe**. Configure `response_mode` in `/etc/defense-agent/config.json`:
+
+| Mode | Assessment | Automatic containment |
+| --- | --- | --- |
+| `observe` | Collect, correlate and describe | Disabled |
+| `review` | Preserve the assessment and show eligible cases in REVIEW REQUIRED | Disabled; operator investigation required |
+| `enforce` | Assess first, then revalidate the response plan | Only explicitly scoped and verified actions |
+
+Review is an investigation queue, not an approval button. Changing to Enforce does not retroactively execute a review item. Existing rollback commands remain manual, root-only and receipt-based. Restart the core after a configuration change; the response worker reloads policy and the executor reloads it before every request, so switching away from Enforce also blocks queued containment.
+
+`response_users` is an explicit list of local accounts eligible for account quarantine; `ssh_response_users` separately scopes SSH session termination. Accounts with UID below 1000, UID 65534, root, `protected_users`, and membership in `protected_groups` (default `sudo`, `wheel`, `adm`) are excluded. Directory accounts cannot be quarantined. `protected_ips` accepts individual addresses or CIDR networks. Dedicated-source IP requirements still apply: failed logins, signatures, shared IPs and model confidence alone never authorize a block. Detection is not restricted to the response account list. Production configuration does not treat an administrator exception as proof of benign activity; `trust_account_creators` is enabled only by the explicit demo profile.
+
+Default observation now also includes warning/error priorities 0–4 from any journald service, audit-service availability warnings, selected kernel integrity warnings, and non-root executions in audited login sessions. Temporary-directory executables and selected kernel/namespace/capability utilities create reviewable context, not a compromise verdict. The AEGIS database does not persist raw command arguments or generic service message text; native audit logging has its own retention policy. Standard root-owned, non-writable-by-group/others Nginx/Apache access logs are discovered at startup; custom paths and application formats still require adapters. Set `service_warnings_enabled` or `auto_access_logs` to `false` to opt out. More observation can increase queue pressure and does not increase the model budget automatically.
+
+System and host-change batches now continue after 64 records with a new part at that boundary; application parts remain limited to 32. Related subjects may retain a continuation root for `incident_context_seconds` (120–3600, default 3600). A snapshot includes counts and time range from at most eight preceding parts. These summaries are untrusted historical context, never causal evidence or authorization. The detailed live correlation window remains ten minutes; previous parts are not a complete long-term attack graph.
+
+### Install, update and recover
+
+Run `sudo bash aegis/install.sh` for the ordinary agent, or `--demo` only on an isolated training VM. Model configuration is optional for installation: without `ai.json`, collection continues but model assessment and new automatic containment are unavailable. The vulnerable application is not installed in the ordinary profile.
+
+The installer checks platform/configuration/free space, snapshots managed code/configuration/unit files under root-private `/var/lib/defense-agent-releases/`, and attempts restoration if installation fails. Incident databases and response receipts are never reverted. Save the printed release-backup path. To roll back a completed deployment:
+
+```sh
+sudo python3 aegis/lifecycle.py rollback /var/lib/defense-agent-releases/BACKUP_ID
+```
+
+Rollback refuses if managed files changed after installation, preserving operator edits. `recover` is for an inspected, incomplete deployment. `uninstall BACKUP_PATH` removes verified managed code, units and sensor configuration while retaining incident data, configuration, receipts and release backups. It does not restore disabled application accounts or remove independent firewall rules. Existing timed AEGIS IP blocks retain their expiry; loaded audit rules can remain until reboot. Deployment snapshots contain private configuration and must not be committed or shared. Package installation itself is not reversed, and database schema downgrades are not promised.
+
+### Local incident handling
+
+Incident history, evidence exports and diagnostic reports stay on the VM. This release does not include an external alert sender. The existing Azure model integration remains separate: selected normalized evidence is sent to that configured model for assessment. Local retention limits still apply; loss of the VM can also mean loss of locally stored evidence.
+
+### Release gates
+
+Short live suites validate selected behaviors, not universal detection or sustained production capacity. Before a stable 1.0 release, complete: a clean-host installation, update/rollback acceptance, measured attack and benign-admin scenarios, a 72-hour collector soak, and a seven-day Observe pilot with representative application traffic. Record false positives, source gaps, queue age, model availability and collection/assessment/response latency. No confidence percentage is a calibrated probability.
+
+```sh
+sudo python3 aegis/live-release-tests.py
+sudo python3 aegis/release_check.py --seconds 259200 --output /root/aegis-soak.jsonl
+```
+
+`release_check.py` is read-only and reports the actual duration and continuity checks; a short run cannot pass a 72-hour requirement. It does not generate attacks, prove detection accuracy or claim a response-time SLA. Long tests remain explicit release gates until their results are recorded. External notification delivery is deferred.
+
+
 
 ## Run on an isolated Ubuntu 24.04 VM
 
@@ -239,7 +293,7 @@ proxy_set_header X-Request-ID $request_id;
 
 A separate adapter, `"format":"access"`, reads the standard numeric-client-IP Common/Combined access format used by [Apache](https://httpd.apache.org/docs/2.4/logs.html) and [Nginx](https://nginx.org/en/docs/http/ngx_http_log_module.html). It does not extract request/session IDs from that format. Custom suffixes, multiline errors, container JSON wrappers, SQL database logs and arbitrary free text need an explicit adapter or conversion to JSONL. Select one authoritative stream per producer; AEGIS does not deduplicate copies across configured application files or journal streams. Ensure the producer flushes logs promptly; a collector cannot read buffered records before they are written.
 
-Sources sharing an `application` name contribute to batches partitioned by reported session, then request, then user/IP; records without these identifiers remain explicitly unattributed. A request-only record may join a uniquely matching reported session. Different reported sessions remain separate even for the same user and IP. Request/session identifiers are hashed before persistence and create **producer-reported context links**, never independently verified kernel identities. Identical identifiers in different applications do not link. IP or time proximity alone creates no chain edge. Failed logins require five reports for the same account/IP before opening a case; SQL signatures, account/permission operations, security alerts and application errors are review signals. A successful HTTP status does not establish exploitation. Application batches contain at most 32 evidence records (including context), keeping even large normalized records within the model input bound; recent-context lookup is bounded to 256 events over ten minutes. At capacity, a new linked part preserves the next event and up to eight representative authentication/security signals and recent context. Root/parent IDs and part numbers survive restart and appear in the chain view. The model sees this bounded context, not every previous part; no claim of complete historical context is made. Full parts are sealed against subsequent evidence changes. New evidence within an open part can still invalidate its pending assessment. The 120-second case matching window and global 256-active-case cap remain; overload is reported and can prevent new case enrollment. Recent normalized telemetry remains bounded and is not a lossless archive.
+Sources sharing an `application` name contribute to batches partitioned by reported session, then request, then user/IP; records without these identifiers remain explicitly unattributed. A request-only record may join a uniquely matching reported session. Different reported sessions remain separate even for the same user and IP. Request/session identifiers are hashed before persistence and create **producer-reported context links**, never independently verified kernel identities. Identical identifiers in different applications do not link. IP or time proximity alone creates no chain edge. Failed logins require five reports for the same account/IP before opening a case; SQL signatures, account/permission operations, security alerts and application errors are review signals. A successful HTTP status does not establish exploitation. Application batches contain at most 32 evidence records (including context), keeping even large normalized records within the model input bound; recent-context lookup is bounded to 256 events over ten minutes. At capacity, a new linked part preserves the next event and up to eight representative authentication/security signals and recent context. Root/parent IDs and part numbers survive restart and appear in the chain view. The model sees this bounded context, not every previous part; no claim of complete historical context is made. Full parts are sealed against subsequent evidence changes. New evidence within an open part can still invalidate its pending assessment. Application continuation matching uses `incident_context_seconds` (default one hour), while detailed context remains bounded to ten minutes and the global active-case cap remains 256; overload is reported and can prevent new case enrollment. Recent normalized telemetry remains bounded and is not a lossless archive.
 
 No generic application record authorizes automatic containment. Session revocation and other application-specific actions still need an explicit, independently validated integration; the existing broker and audited-host response policies are unchanged. The model receives normalized metadata in the existing untrusted-log boundary. Raw messages, bodies, headers, URL queries and session tokens are discarded; paths and correlation identifiers are retained only as hashes. Hashes are correlation aids, not a guarantee of anonymization. Logged user names and IPs remain evidence.
 
@@ -251,7 +305,7 @@ See the [terminal gallery](#terminal-gallery) for source coverage and an indepen
 
 ## Linux system-log coverage
 
-The default `system_log_mode: "auto"` selects journald when `journalctl` and its runtime socket are present at core startup, otherwise it selects text files. This is a startup capability check, not proof that every producer logs correctly; runtime collector failures remain visible. The installer still targets systemd-based Ubuntu/Debian. Paths and parsers for `/var/log/secure` and `/var/log/messages` are supported, but this is not a tested RHEL installer or a claim to support every Linux distribution.
+The default `system_log_mode: "auto"` selects journald when `journalctl` and its runtime socket are present at core startup, otherwise it selects text files. This is a startup capability check, not proof that every producer logs correctly; runtime collector failures remain visible. The validated installer targets Ubuntu 24.04 x86_64 with systemd. Paths and parsers for `/var/log/secure` and `/var/log/messages` are supported, but this is not a tested RHEL installer or a claim to support every Linux distribution.
 
 Additional normalized events cover PAM sessions/authentication failures, account/group management messages, cron activity, service/timer transitions, and kernel OOM/process faults or AppArmor/SELinux denials **when emitted into the selected streams**. Unknown messages are counted; raw messages, command arguments, credentials and key contents are not retained. Kernel audit remains independent, with its existing scoped process/file rules. This does not add full process auditing for every user, database audit logs or arbitrary application parsers.
 
@@ -259,7 +313,7 @@ For file fallback, the collector chooses one existing path per category: `auth.l
 
 File input is read continuously in bounded batches: at most 25 line chunks per source every 200 ms, maximum four sources and 8 KiB per line. Events and file positions commit together. Partial lines wait for completion; oversized records are discarded and reported. Rotation drains the open inode before switching; replacement after restart, truncation/regrowth and bounded initial replay produce a gap warning. Initial reads are limited to the last 1 MiB and only events within the correlation window are admitted. Files must be root-owned regular files without group/world write permissions; symlinks are rejected. RFC3164 timestamps use the host's local timezone and the nearest year; ISO timestamps are also supported. A readable file does not prove producer liveness or lossless collection.
 
-Press **5** for parser coverage, the selected transport, candidate paths, file status/backlog and read/parsed/unrecognized/copy/stale/invalid counters. Missing or inaccessible sources are explicit. Text records never acquire invented boot, audit-session or process identity and cannot authorize a response. Repeated authentication failures and other review signals create bounded `system_activity` cases. Without a verified audit-session identity, events are batched by category (authentication, services, scheduler, kernel), with at most 64 evidence records per case; shared category/time does not imply a causal chain. The failure threshold still applies to the same reported account/source pair; unrelated users do not add up to one login chain. Normal events remain observations/context. The existing model budget, evidence limits, response policy and root-only rollback remain in force.
+Press **5** for parser coverage, the selected transport, candidate paths, file status/backlog and read/parsed/unrecognized/copy/stale/invalid counters. Missing or inaccessible sources are explicit. Text records never acquire invented boot, audit-session or process identity and cannot authorize a response. Repeated authentication failures and other review signals create bounded `system_activity` cases. Without a verified audit-session identity, events are batched by category (authentication, services, scheduler, kernel), with at most 64 evidence records per continuation part; shared category/time does not imply a causal chain. The failure threshold still applies to the same reported account/source pair; unrelated users do not add up to one login chain. Normal events remain observations/context. The existing model budget, evidence limits, response policy and root-only rollback remain in force.
 
 Run `sudo python3 aegis/live-system-source-tests.py` only on the isolated test VM after installation. It verifies real service/PAM collection, a tagged cron fixture, durable file reading and temporary core file-mode configuration, then restores the configuration and removes its temporary log.
 
@@ -300,7 +354,7 @@ The console polls its read-only database every second. Case assessment waits for
 
 The terminal displays model availability, queued cases, oldest wait and used/reserved budget. Stale or missing worker health becomes `MODEL UNAVAILABLE`. The core persists each snapshot version’s queue entry, original enqueue time and boot ID. Waiting for budget or provider recovery survives restarts and resumes automatically, within `analysis_queue_max_age_seconds` (default two hours, clamped to 90 seconds–24 hours). The worker still allows at most three failed model attempts. `analysis_timeout_seconds` (default 90 seconds) now limits automatic response eligibility, not historical description: a later positive verdict is recorded but its actions are cleared and sent to manual review. A changed host boot also prohibits automatic response from queued evidence. Expired queue entries and invalid/failed model results require manual review; they do not retry indefinitely. No model error or missing assessment authorizes a response.
 
-The 40-call cap is a cost guardrail for this prototype, not a monetary budget or a capacity guarantee. It averages one call per 90 seconds over a full hour, although short bursts can be processed faster; the reservation protects some response capacity but cannot guarantee a response during sustained attacks. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production use would need off-VM evidence retention, external alert delivery, sustained load testing beyond the bounded lab burst, and removal or stronger isolation of the privileged training broker.
+The 40-call cap is a cost guardrail for this prototype, not a monetary budget or a capacity guarantee. It averages one call per 90 seconds over a full hour, although short bursts can be processed faster; the reservation protects some response capacity but cannot guarantee a response during sustained attacks. Evidence correlation is bounded to ten minutes. These settings support near-real-time operation but are **not a response-time guarantee** under load or model throttling. Production rollout still requires configuring and verifying the required local evidence-retention policy, sustained load testing beyond bounded lab bursts, and exclusion of the privileged training broker.
 
 Source and tests are under [`aegis/`](aegis/). Local VM logs, keys, generated case data and deployment work files are excluded from Git.
 
@@ -353,6 +407,17 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-08 — Linux release candidate hardening
+
+- Preserve existing REVIEW REQUIRED assessments when later events arrive by starting a linked continuation instead of clearing the review.
+- Wait up to 120 seconds for the package-manager lock during installation, allowing concurrent unattended upgrades to finish.
+- Add Observe/Review/Enforce policy, executor-side mode enforcement, explicit non-lab account scope, protected administrative groups and protected CIDR ranges. Preserve evidence and review items without automatic action outside Enforce.
+- Expand default journald warning coverage, standard access-log discovery and audited non-root session execution context. Continue full host/system batches and provide bounded historical context without granting new response authority.
+- Add deployment preflight, private release snapshots, guarded rollback/uninstall and service hardening. Ordinary installation supports collection without configured model access.
+- Keep incident history and diagnostic exports local to the VM. External alert delivery is explicitly deferred; no sender module or service is shipped.
+- Revalidated on 2026-11-08: all 254 unit tests passed on the Azure Linux VM without skips; locally 248 passed and six Linux/root-only tests were skipped. Six account-policy checks, nine deployment lifecycle checks, 16 system-source checks, 17 SQL/application checks and eight SSH/session checks passed. Real HTTP blocking was verified only after a confirmed chain with an explicitly dedicated source; a SQL attempt alone did not block the IP. The first deployment retry encountered a package lock held by unattended upgrades; the revised installer passed a controlled lock-wait test and the complete lifecycle suite on rerun. All 26 installed modules matched the tested source.
+- Add release acceptance fixtures and duration-based continuity reporting. Validation: all 253 unit tests passed on the Azure Linux VM without skips; local results were 247 passed and six Linux/root-only skips. Live SSH, application, recovery and source suites passed. Six real-account policy/rollback checks and nine deployment lifecycle checks passed; all 26 installed modules matched the tested source. Lifecycle coverage includes a fresh agent profile on the existing VM, not a newly provisioned operating system. The independent-application assessment initially hit the ordinary-analysis reservation; releasing only the reserve for that test, within the unchanged hourly cap, verified assessment, then the original reserve was restored. A 120-second collector continuity run passed all 25 samples with no new loss/rejection counters. The 72-hour soak and seven-day pilot are not yet completed; this is not a stable 1.0 claim.
 
 ### 2026-10-16 — Configuration coverage inventory
 

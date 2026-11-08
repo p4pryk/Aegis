@@ -17,7 +17,7 @@ def painted(line):
     return ''.join(COLORS[level]+text for text,level in parts)+'\x1b[0m'
 
 NAME = 'A E G I S'
-STATES = {'authorized':'AUTHORIZED', 'collecting':'COLLECTING', 'awaiting_analysis':'ANALYZING', 'recognized':'ASSESSED', 'defended':'DEFENDED', 'observing':'MONITORING', 'insufficient_evidence':'INSUFFICIENT EVIDENCE', 'analysis_error':'ANALYSIS ERROR', 'defense_error':'RESPONSE ERROR'}
+STATES = {'review_required':'REVIEW REQUIRED', 'authorized':'AUTHORIZED', 'collecting':'COLLECTING', 'awaiting_analysis':'ANALYZING', 'recognized':'ASSESSED', 'defended':'DEFENDED', 'observing':'MONITORING', 'insufficient_evidence':'INSUFFICIENT EVIDENCE', 'analysis_error':'ANALYSIS ERROR', 'defense_error':'RESPONSE ERROR'}
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 def safe(value):
@@ -165,6 +165,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') else ''
     lines.append(fit(f"Audit + journal: {health.get('records_per_second',0)} records/s | Audit pending: {spool.get('rows','--')} | Oldest: {spool.get('oldest_seconds',0):.1f}s | Lost: {spool.get('dropped','--')}"+warning,width))
     lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
+    lines.append(fit('Response policy: '+str(heartbeat.get('response_mode','unknown')).upper()+' | Missing model assessment always holds containment',width))
     model=data.get('model_health',{});model_status=model.get('status','MODEL UNAVAILABLE') if 0<=now-model.get('time',0)<45 else 'MODEL UNAVAILABLE'
     lines.append(Line(fit(f"Model: {model_status} | Pending: {model.get('pending','--')} | Oldest: {model.get('oldest_seconds',0):.0f}s | Calls: {model.get('hourly_calls','--')}/{model.get('cap','--')} | Reserve: {model.get('reserve','--')}",width),'neutral' if model_status in ('IDLE','ANALYZING') else 'warning'))
     if data.get('correlation_overload'):
@@ -234,7 +235,7 @@ def read_snapshot(database,case_id=None):
         timing=conn.execute('SELECT t.* FROM case_timings t JOIN cases c ON c.id=t.case_id ORDER BY c.updated_at DESC LIMIT 1').fetchone()
         states['latest_timing']=dict(timing) if timing else {}
         from response_view import read_receipts
-        reviews=[dict(r) for r in conn.execute("SELECT c.*, (SELECT details_json FROM case_status_history h WHERE h.case_id=c.id AND h.status=c.status ORDER BY h.time DESC LIMIT 1) AS review_details FROM cases c WHERE status IN ('analysis_error','defense_error') ORDER BY updated_at DESC LIMIT 201")]
+        reviews=[dict(r) for r in conn.execute("SELECT c.*, (SELECT details_json FROM case_status_history h WHERE h.case_id=c.id AND h.status=c.status ORDER BY h.time DESC LIMIT 1) AS review_details FROM cases c WHERE status IN ('analysis_error','defense_error','review_required') ORDER BY updated_at DESC LIMIT 201")]
         steps=[dict(r) for r in conn.execute('SELECT s.* FROM response_steps s JOIN cases c ON c.id=s.case_id ORDER BY c.updated_at DESC,s.position LIMIT 201')]
         return {'response_steps':steps[:200],'response_steps_more':len(steps)>200,'cases':cases,'observations':events,'metrics':metrics,'review_cases':reviews[:200],'review_more':len(reviews)>200,**read_queue(conn),**states,**read_receipts(database)}
     finally:conn.close()

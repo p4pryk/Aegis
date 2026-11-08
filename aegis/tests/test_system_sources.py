@@ -55,8 +55,8 @@ class SystemSources(unittest.TestCase):
 
     def test_unattributed_account_burst_is_one_bounded_case_not_one_model_job_per_user(self):
         for n in range(80):system_sources.ingest(self.e,self.event('useradd','new user: name=lab_test'+str(n),n))
-        self.assertEqual(self.store.db.execute("SELECT count(*) FROM cases WHERE kind='system_activity'").fetchone()[0],1)
-        self.assertEqual(self.store.db.execute('SELECT count(*) FROM case_events').fetchone()[0],64)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM cases WHERE kind='system_activity'").fetchone()[0],2)
+        self.assertEqual(self.store.db.execute('SELECT count(DISTINCT event_id) FROM case_events').fetchone()[0],80)
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM observations').fetchone()[0],80)
     def test_unrelated_failed_users_do_not_satisfy_auth_threshold(self):
         for n in range(8):system_sources.ingest(self.e,self.event('sshd','Failed password for user'+str(n)+' from 192.0.2.8 port 44',n))

@@ -9,6 +9,8 @@ __pycache__/
 *.key
 .env*
 /ai.json
+/alerts.json
+/release-backups/
 /config.json
 /live-results/
 .DS_Store

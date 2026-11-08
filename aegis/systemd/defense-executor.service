@@ -10,7 +10,13 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 UMask=0027
 NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
 ProtectHome=yes
 ProtectSystem=true
+MemoryMax=256M
 [Install]
 WantedBy=multi-user.target

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Local policy engine. No model output is executable input."""
 from contextlib import contextmanager
+from policy import account_allowed, require_enforce
 import argparse, collections, signal, grp, hashlib, ipaddress, json, os, pathlib, pwd, re, socket, sqlite3, stat, struct, subprocess, threading, time
 
 JOURNAL_HEALTH = {'dropped_events':0,'connected':False}
 JOURNAL_CONTEXT_HEALTH = {'dropped_events':0,'connected':False}
 
-DEFAULTS = dict(mode='correlated', protected_ips=[], protected_users=['root','labadmin'], ssh_threshold=5, ssh_window=30, block_seconds=600, data_dir='/var/lib/defense-agent', runtime_dir='/run/defense-agent', audit_socket='/run/defense-agent/audit.sock', executor_socket='/run/defense-agent/executor.sock')
+DEFAULTS = dict(response_mode='observe', response_users=[], protected_groups=['sudo','wheel','adm'], lab_response_enabled=False, mode='correlated', protected_ips=[], protected_users=['root','labadmin'], ssh_threshold=5, ssh_window=30, block_seconds=600, data_dir='/var/lib/defense-agent', runtime_dir='/run/defense-agent', audit_socket='/run/defense-agent/audit.sock', executor_socket='/run/defense-agent/executor.sock')
 DEFAULTS.update(journal_comms=['sudo','su','su-l'], journal_identifiers=['sudo','su','systemd'], journal_units=['aegis-target.service','nginx.service','apache2.service','httpd.service'])
 
 def run(args, ok=(0,)):
@@ -18,7 +19,7 @@ def run(args, ok=(0,)):
 def safe_ip(value, config):
     try: ip = ipaddress.ip_address(value)
     except (ValueError,TypeError): return None
-    if ip.is_loopback or ip.is_unspecified or ip.is_multicast or str(ip) in config['protected_ips']: return None
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast or any(ip in ipaddress.ip_network(network,strict=False) for network in config['protected_ips']): return None
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         return safe_ip(str(ip.ipv4_mapped), config)
     return str(ip)
@@ -28,7 +29,8 @@ def trusted_file(path):
     return stat.S_ISREG(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022
 
 def ssh_response_user(user,config):
-    return user in config.get('ssh_response_users',[]) or bool(config.get('ssh_lab_users_enabled',False) and re.fullmatch(r'lab_[a-z0-9_]{1,24}',user))
+    scoped=user in config.get('ssh_response_users',[]) or bool(config.get('ssh_lab_users_enabled',False) and re.fullmatch(r'lab_[a-z0-9_]{1,24}',user))
+    return scoped and account_allowed(user,dict(config,response_users=[user],lab_response_enabled=False))
 
 def audit_processes(boot_id,session,auid):
     if type(session) is not int or type(auid) is not int or session<0 or session>=4294967295 or auid<1000 or auid==65534:raise ValueError('invalid session identity')
@@ -68,6 +70,7 @@ class Executor:
             p=subprocess.run(['nft','-f','-'],input=rules,text=True,capture_output=True)
             if p.returncode: raise RuntimeError(p.stderr)
     def execute(self, request, undo_token=None):
+        require_enforce(self.c)
         if request.get('action') == 'quarantine_persistence':
             from persistence import quarantine
             return quarantine(request)
@@ -115,7 +118,7 @@ class Executor:
             return dict(verified=True,session=request['session'],auid=request['auid'],user=user,killed_pids=killed,already_closed=not processes)
         if request.get('action') == 'quarantine_account':
             name=request.get('user','')
-            if not re.fullmatch(r'lab_[a-z0-9_]{1,24}',name) or name in self.c['protected_users']: raise ValueError('account outside lab policy')
+            if not account_allowed(name,self.c): raise ValueError('account outside response policy')
             account=pwd.getpwnam(name)
             if type(request.get('expected_uid')) is not int or account.pw_uid!=request['expected_uid']:raise ValueError('Account identity changed')
             if account.pw_uid<1000 or account.pw_uid==65534 or account.pw_uid==os.getuid() and os.getuid()!=0: raise ValueError('protected uid')
@@ -198,6 +201,7 @@ class CorrelatedEngine:
         CREATE TABLE IF NOT EXISTS analysis_queue(case_id TEXT PRIMARY KEY,version INTEGER,queued_at REAL,boot_id TEXT,reason TEXT);
         CREATE TABLE IF NOT EXISTS cases(id TEXT PRIMARY KEY,created_at REAL,updated_at REAL,kind TEXT,subject TEXT,version INTEGER,status TEXT,evidence_json TEXT,analysis_json TEXT,result_json TEXT);
         CREATE TABLE IF NOT EXISTS case_events(case_id TEXT,event_id TEXT,event_time REAL,kind TEXT,subject TEXT,details_json TEXT,PRIMARY KEY(case_id,event_id));
+        CREATE INDEX IF NOT EXISTS case_event_lookup ON case_events(event_id,case_id);
         CREATE TABLE IF NOT EXISTS case_status_history(case_id TEXT,status TEXT,time REAL,details_json TEXT);
         CREATE TABLE IF NOT EXISTS correlation_events(event_id TEXT PRIMARY KEY,event_time REAL,kind TEXT,subject TEXT,details_json TEXT);
         CREATE INDEX IF NOT EXISTS correlation_time ON correlation_events(event_time);
@@ -219,16 +223,20 @@ class CorrelatedEngine:
         cur=self.db.execute('INSERT OR IGNORE INTO correlation_events VALUES (?,?,?,?,?)',(event['event_id'],event['event_time'],event['kind'],event['subject'],canonical(event['details'])));self.db.commit();return bool(cur.rowcount)
     def create_or_append(self,kind,subject,event,extra=(),case_id=None):
         now=time.time()
-        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-120)).fetchone()
+        context_seconds=max(120,min(3600,int(self.c.get('incident_context_seconds',3600)))) if kind in ('application_activity','host_change','system_activity') else 120
+        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-context_seconds)).fetchone()
         if case_id:
             row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
             if not row:return None
         parent=None
-        if kind=='application_activity' and row:
+        continuation_kind=kind in ('application_activity','host_change','system_activity')
+        part_limit=32 if kind=='application_activity' else 64
+        if continuation_kind and row:
             identifier=row[0]
-            if self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
-            if self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(identifier,event['event_id'])).fetchone():return identifier
-            if len(self.events(identifier))>=32:
+            if kind=='application_activity' and self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
+            if kind=='application_activity' and self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(identifier,event['event_id'])).fetchone():return identifier
+            current_status=self.db.execute('SELECT status FROM cases WHERE id=?',(identifier,)).fetchone()[0]
+            if (len(self.events(identifier))>=part_limit or current_status=='review_required') and not self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(identifier,event['event_id'])).fetchone():
                 parent=identifier
                 # Seal the preceding part before new evidence can invalidate its assessment.
                 if self.db.execute('SELECT status FROM cases WHERE id=?',(parent,)).fetchone()[0]=='collecting':
@@ -249,15 +257,14 @@ class CorrelatedEngine:
                 previous=self.store.state('correlation_overload') or {}
                 self.store.state('correlation_overload',{'time':now,'active_cases':active,'rejections':previous.get('rejections',0)+1});return None
             self.db.execute('INSERT INTO cases VALUES (?,?,?,?,?,?,?,?,?,?)',(identifier,now,now,kind,subject,0,'collecting','{}','{}','{}'));self.db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',(identifier,'collecting',now,'{}'))
-        if kind=='application_activity':
+        if continuation_kind:
             prior=self.db.execute('SELECT root_id,part FROM case_parts WHERE case_id=?',(parent,)).fetchone() if parent else None
             self.db.execute('INSERT OR IGNORE INTO case_parts VALUES (?,?,?,?)',(identifier,prior[0] if prior else identifier,parent,prior[1]+1 if prior else 1))
-        if kind=='application_activity' and not parent:
+        if continuation_kind and not parent:
             root=self.db.execute('SELECT root_id FROM case_parts WHERE case_id=?',(identifier,)).fetchone()[0]
-            earlier={r[0] for r in self.db.execute('SELECT e.event_id FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=? AND p.case_id!=?',(root,identifier))}
-            extra=[e for e in extra if e['event_id'] not in earlier]
+            extra=[e for e in extra if not self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE e.event_id=? AND p.root_id=? AND p.case_id!=? LIMIT 1',(e['event_id'],root,identifier)).fetchone()]
         changed=False
-        for e in ([event,*extra] if kind=='application_activity' else [*extra,event]):
+        for e in ([event,*extra] if continuation_kind else [*extra,event]):
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
             if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
@@ -440,16 +447,20 @@ class CorrelatedEngine:
         if kind in ('USER_START','1105','USER_END','1106'):
             self.session_record(kind,fields,content,event_id,timestamp)
         elif kind in ('SYSCALL','1300'):
-            if fields.get('success')!='yes' or fields.get('key') not in self.c.get('audit_exec_keys',['lab_root_exec','aegis_app_exec']):return
+            if fields.get('success')!='yes' or fields.get('key') not in self.c.get('audit_exec_keys',['lab_root_exec','aegis_app_exec','aegis_session_exec']):return
             try:pid=int(fields['pid']);ppid=int(fields['ppid'])
             except (KeyError,ValueError):return
             snap=self.audit_snapshot(pid);parent=self.audit_snapshot(ppid)
             # Only kernel audit metadata and process identity enter model evidence.
-            details={'pid':pid,'ppid':ppid,'exe':fields.get('exe','')[:200],'boot_id':self.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'start_ticks':snap.get('start_ticks') if snap else None,'parent_start_ticks':parent.get('start_ticks') if parent else None,'cgroup':snap.get('cgroup') if snap else parent.get('cgroup') if parent else None}
+            details={'pid':pid,'ppid':ppid,'exe':fields.get('exe','')[:200],'boot_id':self.boot_id,'uid':fields.get('uid'),'euid':fields.get('euid'),'auid':fields.get('auid'),'session':fields.get('ses'),'start_ticks':snap.get('start_ticks') if snap else None,'parent_start_ticks':parent.get('start_ticks') if parent else None,'cgroup':snap.get('cgroup') if snap else parent.get('cgroup') if parent else None}
             event=self.normalize('process_exec',str(pid),details,event_id+':exec',timestamp)
             if self.remember(event):
                 self.store.observe('auditd','process_exec',details['exe'],'Process execution; PID '+str(pid)+', parent '+str(ppid)+'.',event['event_id'],timestamp)
                 self.enrich_accounts(event);self.enrich_ssh_accounts()
+                executable=pathlib.PurePosixPath(details['exe'])
+                if executable.name in ('insmod','rmmod','modprobe','setcap','nsenter','unshare') or str(executable).startswith(('/tmp/','/var/tmp/','/dev/shm/')):
+                    from telemetry import identity
+                    self.create_or_append('host_change',':'.join(identity(details) or (self.boot_id,'unattributed')),event)
                 if pathlib.PurePath(details['exe']).name in ('sh','dash','bash') and any(unit in line.rsplit(':',1)[-1].split('/') for unit in self.c.get('application_units',[]) for line in (details.get('cgroup') or '').splitlines()):
                     self.create_or_append('application_shell',event['event_id'],event)
         elif kind in ('ADD_USER','1114'):
@@ -560,7 +571,7 @@ class CorrelatedEngine:
                 try:uid=pwd.getpwnam(account['subject']).pw_uid;actor_uid=pwd.getpwnam(actor).pw_uid
                 except KeyError:uid=actor_uid=0
                 scoped=ssh_response_user(actor,self.c) and actor not in self.c['protected_users'] and actor not in self.c.get('ssh_account_creator_allowlist',[]) and actor_uid==int(ld['auid'])
-                target_ok=bool(re.fullmatch(r'lab_[a-z0-9_]{1,24}',account['subject'])) and account['subject'] not in self.c['protected_users'] and uid>=1000 and uid!=65534 and uid==account['details'].get('account_uid')
+                target_ok=account_allowed(account['subject'],self.c) and uid>=1000 and uid!=65534 and uid==account['details'].get('account_uid')
                 if scoped and target_ok:
                     allowed=[dict(action='quarantine_account',user=account['subject']),dict(action='terminate_session',boot_id=ld['boot_id'],session=int(ld['session']),auid=actor_uid,user=actor)]
                     # Blocking a shared source is never inferred from the model verdict.
@@ -570,7 +581,7 @@ class CorrelatedEngine:
             account=next((e for e in reversed(events) if e['kind']=='account_created'),None)
             if account:
                 chain=self.lineage(account);recorded={e['event_id'] for e in events}
-                if chain and all(e['event_id'] in recorded for e in chain) and re.fullmatch(r'lab_[a-z0-9_]{1,24}',subject) and subject not in self.c['protected_users']:
+                if chain and all(e['event_id'] in recorded for e in chain) and account_allowed(subject,self.c):
                     try:uid=pwd.getpwnam(subject).pw_uid
                     except KeyError:uid=0
                     if uid>=1000 and uid!=65534 and account['details'].get('account_uid')==uid:
@@ -596,15 +607,17 @@ class CorrelatedEngine:
         if kind=='persistence_change':
             try:actor=pwd.getpwuid(int(events[-1]['details'].get('auid'))).pw_name
             except (KeyError,ValueError,TypeError):pass
-            if actor in self.c.get('ssh_account_creator_allowlist',[]):authorization='approved'
+            if self.c.get('trust_account_creators',False) and actor in self.c.get('ssh_account_creator_allowlist',[]):authorization='approved'
         if account:
             try:
                 if actor is None:actor=pwd.getpwuid(int(account['details'].get('auid'))).pw_name
             except (KeyError,ValueError,TypeError):pass
-            if actor in self.c.get('ssh_account_creator_allowlist',[]) and not allowed:authorization='approved'
+            if self.c.get('trust_account_creators',False) and actor in self.c.get('ssh_account_creator_allowlist',[]) and not allowed:authorization='approved'
             elif actor and actor not in self.c.get('ssh_account_creator_allowlist',[]):authorization='unapproved'
         part=self.db.execute('SELECT root_id,parent_id,part FROM case_parts WHERE case_id=?',(identifier,)).fetchone()
-        return {'continuation':dict(root_id=part[0],parent_id=part[1],part=part[2]) if part else None,'version':version,'events':events,'edges':edges,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'account_scope':'lab_ only; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved lab account creation; prior failures additionally required for dedicated IP block'}}
+        from history_context import summarize
+        history=summarize(self.db,identifier) if part else None
+        return {'history_context':history,'continuation':dict(root_id=part[0],parent_id=part[1],part=part[2]) if part else None,'version':version,'events':events,'edges':edges,'allowed_actions':allowed,'required_evidence_ids':required,'policy':{'mode':'correlated','minimum_confidence':.85,'response_mode':self.c.get('response_mode','observe'),'account_scope':'explicit local account scope; audited SSH policy, web shell lineage, or broker SQL session plus kernel account audit required','model_cannot_authorize_new_actions':True,'ip_scope':'confirmed_session_compromise_and_explicit_dedicated_source_only','ssh_response_users':self.c.get('ssh_response_users',[]),'ssh_lab_users_enabled':self.c.get('ssh_lab_users_enabled',False),'account_creator_allowlist':self.c.get('ssh_account_creator_allowlist',[]),'actor':actor,'actor_authorization':authorization,'session_rule':'audited SSH session + root useradd + unapproved scoped local account creation; prior failures additionally required for dedicated IP block'}}
     def validate_result(self,row,result):
         identifier,version,evidence=row;data=json.loads(evidence)
         if not isinstance(result,dict) or result.get('case_id')!=identifier or type(result.get('version')) is not int or result['version']!=version or result.get('snapshot_hash')!=hashlib.sha256(evidence.encode()).hexdigest():raise ValueError('stale version or snapshot hash')
@@ -638,7 +651,10 @@ class CorrelatedEngine:
         data=json.loads(evidence);fresh=self.snapshot(identifier,current[3],current[4],version)
         self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier))
         if not data['allowed_actions']:
-            self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence');return
+            if self.c.get('response_mode','observe')=='review' and analysis.get('attack'):
+                self.status(identifier,'review_required',{'error':'Suspicious assessment requires investigation; no locally authorized containment plan'})
+            else:self.status(identifier,'authorized' if data.get('policy',{}).get('actor_authorization')=='approved' else 'insufficient_evidence')
+            return
         if not analysis['proposed_actions']:self.status(identifier,'observing');return
         queued=self.db.execute('SELECT queued_at,boot_id FROM analysis_queue WHERE case_id=? AND version=?',(identifier,version)).fetchone()
         if queued and (time.time()-queued[0]>self.c.get('analysis_timeout_seconds',90) or queued[1]!=self.boot_id):
@@ -648,6 +664,10 @@ class CorrelatedEngine:
             return
         if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:
             self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
+        mode=self.c.get('response_mode','observe')
+        if mode!='enforce':
+            self.status(identifier,'review_required' if mode=='review' else 'observing',{'error':'Assessment recorded; '+mode+' policy prohibits automatic containment'})
+            return
         # The plan and description become durable together, before the first action.
         try:
             response.prepare(self,identifier,data)
@@ -718,7 +738,11 @@ def serve_executor(c):
         client,_=s.accept()
         with client:
             client.settimeout(3)
-            try:result=journal.record(executor,json.loads(receive(client)));reply={'ok':True,'result':result}
+            try:
+                executor.c=load_config(c.get('_config_path','/etc/defense-agent/config.json'))
+                journal.config=executor.c
+                require_enforce(executor.c)
+                result=journal.record(executor,json.loads(receive(client)));reply={'ok':True,'result':result}
             except Exception as e:reply={'ok':False,'error':str(e)[:500]}
             try:client.send(json.dumps(reply).encode())
             except OSError:pass  # The caller may restart after the action already completed.
@@ -746,7 +770,7 @@ def serve_core(c):
     from application_sources import Applications
     applications=Applications(engine)
     from coverage_check import Probe
-    coverage_probe=Probe(c)
+    coverage_probe=Probe(dict(c,application_sources=list(applications.config.values())))
     mode,paths,journal_available=discover(c)
     files=Files(engine,paths) if c.get('system_logs_enabled',True) and mode=='files' else None
     reader_config=dict(c,_system_source_mode=mode)
@@ -793,7 +817,7 @@ def serve_core(c):
         engine.tick()
         meter.add(consumed,time.monotonic()-loop_start)
         if time.time()-last_health>5:
-            last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid(),'boot_id':engine.boot_id,'analysis_window':c.get('analysis_timeout_seconds',90),'queue_window':max(90,min(86400,c.get('analysis_queue_max_age_seconds',7200)))})
+            last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid(),'boot_id':engine.boot_id,'analysis_window':c.get('analysis_timeout_seconds',90),'response_mode':c.get('response_mode','observe'),'queue_window':max(90,min(86400,c.get('analysis_queue_max_age_seconds',7200)))})
             if last_health-last_audit_health>30:
                 last_audit_health=last_health
                 try:
@@ -829,7 +853,9 @@ def serve_core(c):
 
 def load_config(path='/etc/defense-agent/config.json'):
     c=DEFAULTS.copy();c.update(json.loads(pathlib.Path(path).read_text()))
-    return c
+    from policy import validate
+    c['_config_path']=str(path)
+    return validate(c)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['core','executor','audit-plugin']);parser.add_argument('--config',default='/etc/defense-agent/config.json');a=parser.parse_args()

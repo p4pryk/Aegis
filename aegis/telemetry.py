@@ -54,7 +54,7 @@ def enrich(engine,now):
     rows=engine.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('host_change','persistence_change','ssh_session_account') AND created_at>? AND status NOT IN ('defended','recognized','defense_error','superseded')",(now-600,)).fetchall()
     for identifier,kind,subject in rows:
         events=engine.events(identifier)
-        anchor=next((e for e in events if e['kind'] in (*CHANGES,'account_created')),None)
+        anchor=next((e for e in events if e['kind'] in (*CHANGES,'account_created','process_exec')),None)
         if not anchor:continue
         ident=identity(anchor['details'])
         if ident is None or ident[0]!=engine.boot_id:continue

@@ -41,6 +41,8 @@ def archive(db, identifier):
 
 def prepare(engine, identifier, data):
     """Caller commits this plan atomically with the recognized assessment."""
+    from policy import require_enforce
+    require_enforce(engine.c)
     now = time.time()
     engine.db.execute('INSERT INTO response_runs VALUES (?,?,?,?)',
                       (identifier, engine.boot_id, policy_hash(engine.c), now + 120))
@@ -84,7 +86,7 @@ def advance(engine, identifier, now=None):
         archive(engine.db, identifier)
         engine.db.commit()
         return
-    valid = run[0] == engine.boot_id and run[1] == policy_hash(engine.c) and now <= run[2]
+    valid = engine.c.get('response_mode','observe') == 'enforce' and run[0] == engine.boot_id and run[1] == policy_hash(engine.c) and now <= run[2]
     steps = engine.db.execute('SELECT position,action_json,request_json,status,attempts,next_attempt '
                               'FROM response_steps WHERE case_id=? ORDER BY position', (identifier,)).fetchall()
     for position, raw, request, status, attempts, next_attempt in steps:

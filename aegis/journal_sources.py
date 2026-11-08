@@ -31,6 +31,7 @@ def command(config):
         from system_sources import IDENTIFIERS
         selectors.extend('SYSLOG_IDENTIFIER='+name for name in IDENTIFIERS if name not in ('sshd','sshd-session'))
         selectors.append('_TRANSPORT=kernel')
+        if config.get('service_warnings_enabled',True):selectors.extend('PRIORITY='+str(n) for n in range(5))
     selectors=list(dict.fromkeys(selectors))
     args = ['journalctl', '--follow', '--since=10 minutes ago', '--output=json']
     for i, selector in enumerate(selectors):

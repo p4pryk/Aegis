@@ -72,12 +72,14 @@ def main():
         check('real_200_process_burst_observed',observed()==200,seconds=round(time.time()-started,3))
         check('burst_did_not_increase_spool_or_kernel_loss',after['dropped']==before['dropped'] and lost_after==lost_before)
     finally:
-        command(['systemctl','start','defense-agent']);spool.db.close()
-        if created:command(['userdel',user])
+        try:
+            if created:command(['userdel',user])
+        finally:
+            spool.db.close();command(['systemctl','start','defense-agent'])
 
     with tempfile.TemporaryDirectory(prefix='aegis-operations-') as directory:
         root=pathlib.Path(directory);(root/'ai').mkdir()
-        config=dict(agent.DEFAULTS,data_dir=directory,audit_spool_dir=str(root/'audit'),ai_results_dir=str(root/'ai'),application_log=str(root/'app'))
+        config=dict(agent.DEFAULTS,response_mode='enforce',lab_response_enabled=True,data_dir=directory,audit_spool_dir=str(root/'audit'),ai_results_dir=str(root/'ai'),application_log=str(root/'app'))
         store=agent.Store(config);engine=agent.CorrelatedEngine(config,store,None)
         event=engine.normalize('fixture','response',{},'slow-response-fixture',time.time())
         identifier=engine.create_or_append('fixture','response',event)

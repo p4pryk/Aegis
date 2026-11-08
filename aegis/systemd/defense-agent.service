@@ -8,8 +8,14 @@ Restart=always
 RestartSec=1
 UMask=0027
 NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/defense-agent /run/defense-agent /var/lib/defense-agent-audit
+MemoryMax=256M
 [Install]
 WantedBy=multi-user.target

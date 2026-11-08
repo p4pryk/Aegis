@@ -12,6 +12,15 @@ NAME=re.compile(r'[A-Za-z0-9_.-]{1,64}')
 def sources(config):
     result={};paths=set();items=config.get('application_sources',[])
     if not isinstance(items,list) or len(items)>8:raise ValueError('application_sources must contain at most eight sources')
+    items=list(items)
+    if config.get('auto_access_logs',True):
+        for application,path in (('nginx','/var/log/nginx/access.log'),('apache','/var/log/apache2/access.log'),('httpd','/var/log/httpd/access_log')):
+            if len(items)>=8:break
+            if any(item.get('path')==path or item.get('name')=='auto-'+application for item in items if isinstance(item,dict)):continue
+            try:info=pathlib.Path(path).lstat()
+            except OSError:continue
+            if stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022:
+                items.append(dict(name='auto-'+application,application=application,path=path,format='access'))
     for item in items:
         if not isinstance(item,dict) or set(item)-{'name','application','path','format','owner_uid','fields','events'}:raise ValueError('Invalid application source configuration')
         source=dict(item)

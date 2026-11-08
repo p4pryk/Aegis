@@ -92,7 +92,8 @@ class SSHSessions(unittest.TestCase):
         self.apply(row,proposal);self.assertFalse(self.actions)
     def test_lab_enrollment_requires_explicit_setting(self):
         self.assertFalse(a.ssh_response_user('lab_new',{}))
-        self.assertTrue(a.ssh_response_user('lab_new',{'ssh_lab_users_enabled':True}))
+        with patch.object(a.pwd,'getpwnam',return_value=Mock(pw_uid=1002,pw_gid=1002)):
+            self.assertTrue(a.ssh_response_user('lab_new',{'ssh_lab_users_enabled':True,'protected_groups':[]}))
         self.assertFalse(a.ssh_response_user('administrator',{'ssh_lab_users_enabled':True}))
     def test_executor_rejects_unauthorized_session_user(self):
         e=a.Executor(self.c)

@@ -34,7 +34,7 @@ def account(name):
     return {'uid':int(p[2]),'shell':p[6],'expiry':s[7],'locked':s[1].startswith('!'),
             'password_empty':not s[1],'passwd_hash':digest(':'.join(p)),'shadow_hash':digest(':'.join(s)),
             'quarantine_passwd_hash':digest(':'.join(qp)),'quarantine_shadow_hash':digest(':'.join(qs)),
-            'generation':generation}
+            'generation':generation,'group_hash':digest(pathlib.Path('/etc/group').read_bytes())}
 
 def restore_account(name,before,after):
     # Share shadow-utils' password lock across the comparison and both atomic replacements.
