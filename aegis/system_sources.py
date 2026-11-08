@@ -51,6 +51,8 @@ def parse(program,message,stamp,event_id,source,boot_id=None,metadata=None):
         session=re.search(r'session (opened|closed) for user ([A-Za-z0-9_.@-]{1,64})\b',msg)
         if session:
             kind='system_session';details.update(operation=session[1],user=session[2]);subject=session[2];description='PAM session transition reported.'
+        elif program in ('polkitd','pkexec') and re.search(r'\b(?:failed to authenticate|authentication failed|not authorized|authorization (?:failed|denied))\b',msg,re.I):
+            kind='system_authorization_denied';review=True;details['mechanism']='polkit';description='Polkit authorization failure reported; context and intent require review.'
         elif re.search(r'authentication failure|incorrect password|FAILED LOGIN|not in the sudoers|NOT in sudoers|command not allowed',msg,re.I):
             kind='system_auth_failure';review=True;description='Authentication or privilege request failed.'
             user=re.search(r'\buser=([A-Za-z0-9_.@-]{1,64})\b',msg)
@@ -74,6 +76,10 @@ def parse(program,message,stamp,event_id,source,boot_id=None,metadata=None):
             operation=re.search(r'\b(Failed|Started|Stopped|Starting|Stopping|Scheduled restart|Deactivated|Main process exited)\b',msg)
             if unit and operation:
                 kind='system_service';subject=unit[1];details.update(unit=unit[1],operation=operation[1]);review=operation[1] in ('Failed','Main process exited');description='System service or timer transition reported.'
+                if unit[1] in ('auditd.service','systemd-journald.service','ssh.service','sshd.service','defense-agent.service','defense-executor.service','defense-agent-ai.service','defense-response.service'):
+                    details['security_service']=True
+                    if operation[1] in ('Stopped','Failed','Main process exited'):
+                        review=True;description='Security-related service stopped or failed; maintenance or tampering requires investigation.'
     if (program in ('kernel','audit') or 'apparmor=' in msg or 'avc:' in msg) and kind is None:
         if 'apparmor="DENIED"' in msg or re.search(r'avc:\s+denied\b',msg,re.I):
             kind='system_access_denied';review=True;details['mechanism']='AppArmor' if 'apparmor=' in msg else 'SELinux';description='Mandatory access-control denial reported; a denial does not prove compromise.'

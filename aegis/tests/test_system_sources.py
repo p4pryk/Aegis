@@ -11,6 +11,21 @@ class SystemSources(unittest.TestCase):
         self.e=agent.CorrelatedEngine(self.c,self.store,None)
     def event(self,program,message,n=0):
         return system_sources.parse(program,message,time.time(),'test:'+str(n),'test')
+    def test_polkit_denial_is_reviewable_without_raw_or_automatic_response(self):
+        event=self.event('polkitd','Operator FAILED to authenticate for action SECRET_VALUE')
+        self.assertEqual(event['kind'],'system_authorization_denied');self.assertTrue(event['details']['review_signal'])
+        self.assertNotIn('SECRET_VALUE',json.dumps(event));system_sources.ingest(self.e,event)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity'").fetchone()
+        self.assertIsNotNone(row);self.assertEqual(self.e.snapshot(*row)['allowed_actions'],[])
+        self.assertIsNone(self.event('polkitd','Registered authentication agent'))
+    def test_security_service_stopping_is_not_itself_a_compromise(self):
+        stopped=self.event('systemd','Stopped auditd.service for SECRET_DETAIL')
+        self.assertTrue(stopped['details']['review_signal']);self.assertTrue(stopped['details']['security_service'])
+        self.assertNotIn('SECRET_DETAIL',json.dumps(stopped));system_sources.ingest(self.e,stopped)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity'").fetchone()
+        self.assertEqual(self.e.snapshot(*row)['allowed_actions'],[])
+        self.assertFalse(self.event('systemd','Started auditd.service')['details']['review_signal'])
+        self.assertFalse(self.event('systemd','Stopped example.service')['details']['review_signal'])
     def test_normalized_categories_do_not_store_raw_messages_or_arguments(self):
         samples=[('login','pam_unix(login:session): session opened for user alice(uid=1001) by root(uid=0)','system_session'),
             ('sudo','alice : USER=root ; COMMAND=/usr/bin/echo TOPSECRET','system_privilege'),

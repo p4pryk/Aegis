@@ -172,6 +172,8 @@ Review is an investigation queue, not an approval button. Changing to Enforce do
 
 Default observation now also includes warning/error priorities 0–4 from any journald service, audit-service availability warnings, selected kernel integrity warnings, and non-root executions in audited login sessions. Temporary-directory executables and selected kernel/namespace/capability utilities create reviewable context, not a compromise verdict. The AEGIS database does not persist raw command arguments or generic service message text; native audit logging has its own retention policy. Standard root-owned, non-writable-by-group/others Nginx/Apache access logs are discovered at startup; custom paths and application formats still require adapters. Set `service_warnings_enabled` or `auto_access_logs` to `false` to opt out. More observation can increase queue pressure and does not increase the model budget automatically.
 
+Selected Polkit authorization denials and observed stops or failures of security-related services also create review signals. These signals can reflect ordinary maintenance and do not authorize automatic containment. Service detection depends on an available matching log record.
+
 System and host-change batches now continue after 64 records with a new part at that boundary; application parts remain limited to 32. Related subjects may retain a continuation root for `incident_context_seconds` (120–3600, default 3600). A snapshot includes counts and time range from at most eight preceding parts. These summaries are untrusted historical context, never causal evidence or authorization. The detailed live correlation window remains ten minutes; previous parts are not a complete long-term attack graph.
 
 ### Install, update and recover
@@ -407,6 +409,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-08 — Polkit and security-service signals
+
+- Add review signals for selected Polkit authorization failures and observed stops or failures of audit, SSH and AEGIS services. Preserve only normalized metadata; neither signal alone authorizes a response.
+- Validation: 17 system-source unit tests, two synthetic journald fixtures, and 16 existing live system-source checks passed on the Azure Linux VM. The fixtures exercised the installed collector without stopping a real security service. The local full suite passed 256 tests, with six Linux/root-only tests skipped.
 
 ### 2026-11-08 — Preserve review items across incident types
 
