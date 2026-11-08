@@ -410,6 +410,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-08 — Collector-level continuity checks
+
+- Require healthy status for each enabled collector, with kernel audit mandatory. A stopped, lagging, missing or gap-reporting source fails continuity even when the core process is alive. Compare timestamps after the database read to avoid false stale results when SQLite waits for a writer.
+- Validation: six focused tests and a 15-second live continuity sample passed on the Azure Linux VM after collector recovery. An earlier test correctly reported an audit backlog after the preceding stress tests; it also exposed the database-read timing bug, which was corrected and retested. This short sample is not a soak test.
+
 ### 2026-11-08 — Polkit and security-service signals
 
 - Add review signals for selected Polkit authorization failures and observed stops or failures of audit, SSH and AEGIS services. Preserve only normalized metadata; neither signal alone authorizes a response.
