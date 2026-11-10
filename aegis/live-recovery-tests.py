@@ -110,7 +110,7 @@ def main():
                 check('attempt_history_retained', store.db.execute('SELECT count(*) FROM response_attempts WHERE case_id=?', (identifier,)).fetchone()[0] == 4)
                 check('completed_version_archived', store.db.execute('SELECT result_json FROM case_versions WHERE case_id=?', (identifier,)).fetchone()[0] == raw)
 
-                journal_config = dict(config, journal_comms=[], journal_units=[], journal_identifiers=['aegis-recovery-' + suffix])
+                journal_config = dict(config, system_logs_enabled=False, journal_comms=[], journal_units=[], journal_identifiers=['aegis-recovery-' + suffix])
                 checkpoints = journal_stream.Checkpoints(store)
                 def start_reader():
                     process = subprocess.Popen(journal_stream.arguments('journal_context', journal_config, checkpoints.cursor('journal_context')), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

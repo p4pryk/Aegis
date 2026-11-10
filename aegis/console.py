@@ -163,7 +163,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     pressure=sum(source.get('backpressure_count',0) for source in sources)
     lines.append(fit('Journal backpressure waits: '+str(pressure)+'  |  Cursor replay: '+('GAP REPORTED — CHECK JOURNAL RETENTION' if gaps else 'CHECKPOINTED' if len(sources)==2 else 'UNAVAILABLE'),width))
     spool=health.get('audit_spool',{});storage=data.get('storage_health',{});worker=data.get('response_worker',{})
-    worker_status='ONLINE' if 0<=now-worker.get('time',0)<40 else 'CHECK WORKER'
+    worker_status='ONLINE' if worker.get('status')!='stopped' and 0<=now-worker.get('time',0)<40 else 'CHECK WORKER'
     warning=' [! STORAGE PRESSURE]' if storage.get('pressure') else ''
     warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') else ''
     lines.append(fit(f"Audit + journal: {health.get('records_per_second',0)} records/s | Audit pending: {spool.get('rows','--')} | Oldest: {spool.get('oldest_seconds',0):.1f}s | Lost: {spool.get('dropped','--')}"+warning,width))

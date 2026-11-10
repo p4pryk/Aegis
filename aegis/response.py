@@ -76,7 +76,7 @@ def publish(engine, identifier):
     engine.db.commit()
 
 
-def advance(engine, identifier, now=None):
+def advance(engine, identifier, now=None, stop=None):
     now = time.time() if now is None else now
     run = engine.db.execute('SELECT boot_id,policy_hash,deadline FROM response_runs WHERE case_id=?',
                             (identifier,)).fetchone()
@@ -90,6 +90,7 @@ def advance(engine, identifier, now=None):
     steps = engine.db.execute('SELECT position,action_json,request_json,status,attempts,next_attempt '
                               'FROM response_steps WHERE case_id=? ORDER BY position', (identifier,)).fetchall()
     for position, raw, request, status, attempts, next_attempt in steps:
+        if stop is not None and stop.is_set():break
         if status in ('executed', 'failed'):
             continue
         if not valid or time.time() > run[2]:
@@ -147,34 +148,39 @@ def advance(engine, identifier, now=None):
         engine.db.commit()
 
 
-def resume(engine, now):
+def resume(engine, now, stop=None):
     for identifier, in engine.db.execute("SELECT id FROM cases WHERE status='recognized' ORDER BY created_at LIMIT 256").fetchall():
-        advance(engine, identifier, now)
+        if stop is not None and stop.is_set():break
+        advance(engine, identifier, now, stop=stop)
 
 
 def main():
     import argparse
     import fcntl
     import pathlib
-    from agent import Store, CorrelatedEngine, load_config, request_executor
+    from agent import Store, CorrelatedEngine, load_config, request_executor, shutdown_flag
     from maintenance import maintain
     parser=argparse.ArgumentParser();parser.add_argument('--config',default='/etc/defense-agent/config.json');args=parser.parse_args()
     config=load_config(args.config)
+    stop=shutdown_flag()
     # One durable queue owner across restarts; never hold a SQLite lock during side effects.
     with (pathlib.Path(config['data_dir'])/'response.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         store=Store(config)
         engine=CorrelatedEngine(config,store,lambda request:request_executor(engine.c,request))
         last_maintenance=0
-        while True:
-            engine.c=load_config(args.config)
-            store.state('response_worker',{'time':time.time(),'status':'processing'})
-            resume(engine,time.time())
-            if time.time()-last_maintenance>=60:
-                maintain(engine)
-                last_maintenance=time.time()
-            store.state('response_worker',{'time':time.time(),'status':'idle'})
-            time.sleep(.5)
+        try:
+            while not stop.is_set():
+                engine.c=load_config(args.config)
+                store.state('response_worker',{'time':time.time(),'status':'processing'})
+                resume(engine,time.time(),stop)
+                if not stop.is_set() and time.time()-last_maintenance>=60:
+                    maintain(engine)
+                    last_maintenance=time.time()
+                store.state('response_worker',{'time':time.time(),'status':'stopped' if stop.is_set() else 'idle'})
+                if not stop.is_set():time.sleep(.5)
+        finally:
+            store.db.close()
 
 
 if __name__=='__main__':main()

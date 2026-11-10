@@ -7,6 +7,16 @@ import argparse, collections, signal, grp, hashlib, ipaddress, json, math, os, p
 JOURNAL_HEALTH = {'dropped_events':0,'connected':False}
 JOURNAL_CONTEXT_HEALTH = {'dropped_events':0,'connected':False}
 
+class ShutdownFlag:
+    def __init__(self):self.requested=False
+    def __call__(self,signum,frame):self.requested=True
+    def is_set(self):return self.requested
+
+def shutdown_flag():
+    flag=ShutdownFlag()
+    signal.signal(signal.SIGTERM,flag);signal.signal(signal.SIGINT,flag)
+    return flag
+
 DEFAULTS = dict(response_mode='observe', response_users=[], protected_groups=['sudo','wheel','adm'], lab_response_enabled=False, mode='correlated', protected_ips=[], protected_users=['root','labadmin'], ssh_threshold=5, ssh_window=30, block_seconds=600, data_dir='/var/lib/defense-agent', runtime_dir='/run/defense-agent', audit_socket='/run/defense-agent/audit.sock', executor_socket='/run/defense-agent/executor.sock')
 DEFAULTS.update(journal_comms=['sudo','su','su-l'], journal_identifiers=['sudo','su','systemd'], journal_units=['aegis-target.service','nginx.service','apache2.service','httpd.service'])
 
@@ -792,6 +802,7 @@ def serve_core(c):
     from audit_spool import Spool,consume
     from monitoring import Meter
     if c.get('mode','correlated')!='correlated':raise ValueError('Only correlated analyze-before-defense mode is permitted')
+    stop=shutdown_flag()
     store=Store(c);engine=CorrelatedEngine(c,store,None);spool=Spool(c);meter=Meter()
     from system_sources import discover,family,IDENTIFIERS
     from file_logs import Files
@@ -810,74 +821,82 @@ def serve_core(c):
     threading.Thread(target=reader,args=(events,'ssh',reader_config,checkpoints,JOURNAL_HEALTH),daemon=True).start()
     threading.Thread(target=reader,args=(events,'journal_context',reader_config,checkpoints,JOURNAL_CONTEXT_HEALTH),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
-    while True:
-        loop_start=time.monotonic()
-        consumed=consume(engine,spool)
-        with store.atomic():
-            context_batch=False;processed={}
-            for _ in range(100):
-                try:kind,event=events.get_nowait()
-                except queue.Empty:break
-                if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
+    try:
+        while not stop.is_set():
+            loop_start=time.monotonic()
+            consumed=consume(engine,spool)
+            with store.atomic():
+                context_batch=False;processed={}
+                for _ in range(100):
+                    try:kind,event=events.get_nowait()
+                    except queue.Empty:break
+                    if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
+                    try:
+                        if kind=='journal_context':
+                            program=event.get('SYSLOG_IDENTIFIER') or event.get('_COMM','')
+                            if not files or (program not in IDENTIFIERS and event.get('_TRANSPORT')!='kernel'):
+                                engine.journal_context(event);context_batch=True
+                        elif kind=='ssh':engine.journal_ssh(event)
+                    except (ValueError,TypeError,KeyError) as exc:
+                        store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
+                    processed[kind]=event
+                    consumed+=1
+                if context_batch:
+                    engine.enrich_ssh_accounts();engine.enrich_web_accounts()
+                checkpoints.commit(store,processed)
+            if c.get('application_enabled',False):
                 try:
-                    if kind=='journal_context':
-                        program=event.get('SYSLOG_IDENTIFIER') or event.get('_COMM','')
-                        if not files or (program not in IDENTIFIERS and event.get('_TRANSPORT')!='kernel'):
-                            engine.journal_context(event);context_batch=True
-                    elif kind=='ssh':engine.journal_ssh(event)
-                except (ValueError,TypeError,KeyError) as exc:
-                    store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
-                processed[kind]=event
-                consumed+=1
-            if context_batch:
-                engine.enrich_ssh_accounts();engine.enrich_web_accounts()
-            checkpoints.commit(store,processed)
-        if c.get('application_enabled',False):
-            try:
-                from app_correlation import ingest
-                ingest(engine)
-                engine.enrich_app_cases()
-            except Exception as e:
-                engine.app_health=dict(getattr(engine,'app_health',{}),connected=False,checked_at=time.time())
-                store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
-        if files:consumed+=files.poll()
-        consumed+=applications.poll()
-        engine.tick()
-        meter.add(consumed,time.monotonic()-loop_start)
-        if time.time()-last_health>5:
-            last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid(),'boot_id':engine.boot_id,'analysis_window':c.get('analysis_timeout_seconds',90),'response_mode':c.get('response_mode','observe'),'queue_window':max(90,min(86400,c.get('analysis_queue_max_age_seconds',7200)))})
-            if last_health-last_audit_health>30:
-                last_audit_health=last_health
-                try:
-                    status=run(['auditctl','-s']);audit_health={x.split()[0]:' '.join(x.split()[1:]) for x in status.splitlines() if x.split()}
-                except Exception as e:audit_health={'error':str(e)[:200]}
-            with events.mutex:
-                pending_sources={}
-                for source,record in events.queue:
-                    try:age=max(0,last_health-int(record['__REALTIME_TIMESTAMP'])/1e6)
-                    except (KeyError,ValueError,TypeError):age=0
-                    count,oldest=pending_sources.get(source,(0,0));pending_sources[source]=(count+1,max(oldest,age))
-                first=events.queue[0][1] if events.queue else {}
-                try:journal_age=max(0,last_health-int(first['__REALTIME_TIMESTAMP'])/1e6)
-                except (KeyError,ValueError,TypeError):journal_age=0
-            response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
-            health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
-            from monitoring import source_states,model_health
-            store.state('model_health',model_health(c.get('ai_results_dir','/var/lib/defense-agent-ai'),last_health))
-            health['sources']=source_states(engine,spool,{'ssh':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH)},pending_sources,last_health,audit_health)
-            if files:
-                health['sources']=[dict(source,status='DISABLED',reason='System log files selected; journal authentication is not consumed') if source['name']=='SSH journal' else source for source in health['sources']]
-                health['sources'].extend(files.sources())
-            health['sources'].extend(applications.sources())
-            health['application_coverage']=[dict(name=s['name'],application=s['application'],format=s['format'],path=s['path']) for s in applications.config.values()]
-            health['system_log_coverage']={'mode':mode,'journal_available_at_start':journal_available,'paths':paths,
-                'categories':['Authentication / PAM','Accounts / groups','Sudo / su','Cron / timers','Service transitions','AppArmor / SELinux denials','Kernel OOM / process faults'],
-                'limitations':'Selected formats only; file records cannot prove kernel session/process identity. Process execution remains scoped to configured audit rules.',
-                'enabled':c.get('system_logs_enabled',True),'journal_counts':getattr(engine,'system_log_counts',{})}
-            health['coverage_check']=coverage_probe.poll(health,last_health)
-            store.state('sensor_health',health)
-            pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
-        if consumed==0:time.sleep(.02)
+                    from app_correlation import ingest
+                    ingest(engine)
+                    engine.enrich_app_cases()
+                except Exception as e:
+                    engine.app_health=dict(getattr(engine,'app_health',{}),connected=False,checked_at=time.time())
+                    store.state('app_sensor_error',{'time':time.time(),'error':str(e)[:150]})
+            if files:consumed+=files.poll()
+            consumed+=applications.poll()
+            engine.tick()
+            meter.add(consumed,time.monotonic()-loop_start)
+            if time.time()-last_health>5:
+                last_health=time.time();store.state('heartbeat',{'time':last_health,'pid':os.getpid(),'boot_id':engine.boot_id,'analysis_window':c.get('analysis_timeout_seconds',90),'response_mode':c.get('response_mode','observe'),'queue_window':max(90,min(86400,c.get('analysis_queue_max_age_seconds',7200)))})
+                if last_health-last_audit_health>30:
+                    last_audit_health=last_health
+                    try:
+                        status=run(['auditctl','-s']);audit_health={x.split()[0]:' '.join(x.split()[1:]) for x in status.splitlines() if x.split()}
+                    except Exception as e:audit_health={'error':str(e)[:200]}
+                with events.mutex:
+                    pending_sources={}
+                    for source,record in events.queue:
+                        try:age=max(0,last_health-int(record['__REALTIME_TIMESTAMP'])/1e6)
+                        except (KeyError,ValueError,TypeError):age=0
+                        count,oldest=pending_sources.get(source,(0,0));pending_sources[source]=(count+1,max(oldest,age))
+                    first=events.queue[0][1] if events.queue else {}
+                    try:journal_age=max(0,last_health-int(first['__REALTIME_TIMESTAMP'])/1e6)
+                    except (KeyError,ValueError,TypeError):journal_age=0
+                response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
+                health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
+                from monitoring import source_states,model_health
+                store.state('model_health',model_health(c.get('ai_results_dir','/var/lib/defense-agent-ai'),last_health))
+                health['sources']=source_states(engine,spool,{'ssh':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH)},pending_sources,last_health,audit_health)
+                if files:
+                    health['sources']=[dict(source,status='DISABLED',reason='System log files selected; journal authentication is not consumed') if source['name']=='SSH journal' else source for source in health['sources']]
+                    health['sources'].extend(files.sources())
+                health['sources'].extend(applications.sources())
+                health['application_coverage']=[dict(name=s['name'],application=s['application'],format=s['format'],path=s['path']) for s in applications.config.values()]
+                health['system_log_coverage']={'mode':mode,'journal_available_at_start':journal_available,'paths':paths,
+                    'categories':['Authentication / PAM','Accounts / groups','Sudo / su','Cron / timers','Service transitions','AppArmor / SELinux denials','Kernel OOM / process faults'],
+                    'limitations':'Selected formats only; file records cannot prove kernel session/process identity. Process execution remains scoped to configured audit rules.',
+                    'enabled':c.get('system_logs_enabled',True),'journal_counts':getattr(engine,'system_log_counts',{})}
+                health['coverage_check']=coverage_probe.poll(health,last_health)
+                store.state('sensor_health',health)
+                pathlib.Path(c['data_dir'],'health.json').write_text(json.dumps(health))
+            if consumed==0:time.sleep(.02)
+    finally:
+        try:
+            if files:files.close()
+            applications.close()
+        finally:
+            try:spool.db.close()
+            finally:store.db.close()
 
 def load_config(path='/etc/defense-agent/config.json'):
     c=DEFAULTS.copy();c.update(json.loads(pathlib.Path(path).read_text()))

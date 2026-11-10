@@ -103,6 +103,8 @@ Host-change and persistence cases are revisited once per second after batched in
 
 Collection is continuous, not a 30-second polling job. Each journal source has a durable cursor, advanced only after its records have been processed and committed. Replayed records inside the ten-minute correlation window are deduplicated; older entries are skipped and cannot trigger a stale response. A full queue pauses the reader instead of discarding records. If journal retention removes a cursor, the reader reports a possible gap and falls back to the last ten minutes. Original journal boot IDs are preserved, so events from a previous boot cannot become current-session context. Auditd now writes selected records to a separate, root-private SQLite inbox before the core processes them. Inbox acknowledgment follows the same core transaction as normalized evidence and its cursor. A restart before acknowledgment replays uncommitted input; a restart after commit skips already processed records. Pending multi-record file events are saved with that cursor. PID metadata is captured on receipt and never replaced with a possibly reused live PID during replay. This covers committed inbox records, not events lost upstream by the kernel/audit dispatcher or before the producer commits. Previous-boot records are counted and skipped; records outside the ten-minute correlation window cannot trigger a stale response.
 
+On an ordinary SIGTERM or SIGINT, the core completes its current loop and closes its SQLite connections. The response worker records the result of its current action and stops before starting the next; pending work remains subject to the existing expiry, boot and policy checks on restart. Forced termination or power loss can still require SQLite recovery and is covered by the separate crash-recovery path.
+
 | Bound | Current value |
 | --- | --- |
 | In-memory journal queue | 4,096 records |
@@ -420,6 +422,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-10 — Graceful collector and response shutdown
+
+- Finish the current core loop and close database connections on normal termination. Finish the current response step, preserve pending work for revalidation and show a stopped worker as unavailable in the terminal.
+- Validation: all 284 unit tests passed on the Azure Linux VM without skips; locally 278 passed and six Linux/root-only tests were skipped. Three live stop/restart cycles each left the incident database immediately readable and retained all 120 records sent during stopping plus one emitted while the core was down; that final record demonstrated journal replay after restart. Eleven crash/recovery and eight operational live checks passed. The recovery fixture was restricted to its own journal tag after an initial broad-reader timeout under heavy test traffic.
 
 ### 2026-11-10 — Local diagnostics
 
