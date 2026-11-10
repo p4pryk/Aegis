@@ -247,6 +247,8 @@ class CorrelatedEngine:
             if fresh:
                 identity_event=fresh
                 row=None
+        if row and kind=='ssh_threshold' and self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(row[0],)).fetchone()[0]>=256 and not self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(row[0],event['event_id'])).fetchone():
+            row=None
         if continuation_kind and row:
             identifier=row[0]
             if kind=='application_activity' and self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
@@ -297,7 +299,16 @@ class CorrelatedEngine:
         ip=safe_ip(ip,self.c)
         if not ip or not isinstance(timestamp,(int,float)) or not -5<=time.time()-timestamp<=600:return
         event=self.normalize('ssh_failure',ip,{'ip':ip,'user':user,'rule':str(rule)[:100] if rule else None},'ssh:'+event_id,timestamp)
-        if self.remember(event):self.create_or_append('ssh_threshold',ip,event)
+        if self.remember(event):
+            # Carry a bounded representative failure per account across case boundaries.
+            rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='ssh_failure' AND subject=? AND event_time BETWEEN ? AND ? ORDER BY event_time DESC LIMIT 256",(ip,timestamp-120,timestamp+120)).fetchall()
+            accounts={}
+            for eid,stamp,ev_kind,subject,raw in rows:
+                details=json.loads(raw);name=details.get('user')
+                if eid!=event['event_id'] and isinstance(name,str) and re.fullmatch(r'[A-Za-z0-9_.@-]{1,64}',name):
+                    accounts.setdefault(name.casefold(),dict(event_id=eid,event_time=stamp,kind=ev_kind,subject=subject,details=details))
+                if len(accounts)>=31:break
+            self.create_or_append('ssh_threshold',ip,event,list(accounts.values()))
     def ssh_success(self,ip,user,timestamp,event_id,pid=None):
         ip=safe_ip(ip,self.c)
         if not ip:return

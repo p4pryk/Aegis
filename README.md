@@ -97,7 +97,7 @@ The sensors observe SSH authentication and sessions, root, audited login-session
 
 This is a **bounded set of default and configured sources**, not a claim to inspect every log on the VM. Both journald collectors feed a bounded 4,096-entry queue; each core loop drains up to 100 journal records, 100 durable audit records and 100 application records. Events are retained in a ten-minute correlation window, and the model receives a case snapshot after two quiet seconds, with a five-second collection cap—not a separate request for every log line. SSH session metadata links `sudo`/`su` by boot ID, audit session and login UID. The AEGIS app uses an exact shared request ID; external web events without that ID remain contextual. Source IP and nearby timestamps never prove causality or authorize a response. The console shows journal backpressure waits and reported cursor gaps.
 
-An SSH case reports **possible password spraying** when its bounded evidence contains failed attempts for at least five distinct account names from the same IP within 120 seconds. The signal is displayed in the terminal and included as untrusted context for model assessment. Shared addresses and legitimate activity can produce the same pattern; the signal does not prove compromise or authorize a block. Counts are limited to the current case and its retained evidence, so this is not a complete detector for slow or distributed spraying.
+An SSH case reports **possible password spraying** when its bounded evidence contains failed attempts for at least five distinct account names from the same IP within 120 seconds. Up to 31 representative account failures are carried from the last 256 matching records into a new case, preserving context across case boundaries and restarts. Full cases roll over instead of silently dropping subsequent failures. The signal is displayed in the terminal and included as untrusted context for model assessment. Shared addresses and legitimate activity can produce the same pattern; the signal does not prove compromise or authorize a block. This bounded, source-IP-based detector does not cover every slow or distributed spray.
 
 Host-change and persistence cases are revisited once per second after batched intake. Matching boot ID, audit session and login UID bring SSH, sudo, process and file metadata into the same case, including delayed records received within the ten-minute window. Enrichment considers at most 2,048 recent relevant records and adds up to 32 matching context events per pass. Process-level links additionally require matching PID birth time; a reused PID cannot supply that link. Same-session attribution is labelled separately from causality and does not grant a response. Relative file names require a CWD from the same audit event, with partial assembly retained across core restarts. Account/group and permission changes without an existing confirmed response chain remain review-only cases.
 
@@ -411,6 +411,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-10 — SSH spray continuity across cases
+
+- Carry bounded, per-account SSH failure context across case boundaries and collector restarts. Roll over full SSH cases so later failures are retained; older and unrelated-source failures do not contribute to the signal or authorize a response.
+- Validation: all 270 unit tests passed on the Azure Linux VM without skips; locally 264 passed and six Linux/root-only tests were skipped. A live isolated-network test sent five real SSH attempts while simulating the case age boundary, detected the pattern and verified the source was not blocked. Eight existing live SSH/session checks also passed.
 
 ### 2026-11-08 — SSH password-spray signal
 

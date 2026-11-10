@@ -20,6 +20,8 @@ def run(*args,check=True,timeout=15):
 
 def main():
     if os.geteuid()!=0 or socket.gethostname()!='defense-lab-01':raise SystemExit('Run only on the isolated AEGIS test VM')
+    if sys.argv[1:] not in ([],['--cross-boundary']):raise SystemExit('Usage: live-ssh-spray-tests.py [--cross-boundary]')
+    cross_boundary=bool(sys.argv[1:])
     suffix=str(time.time_ns())[-6:];users=['aegis_spray_'+suffix+'_'+str(n) for n in range(5)]
     for user in users:
         try:pwd.getpwnam(user)
@@ -31,7 +33,18 @@ def main():
         run('ip','link','set',PEER,'netns',NS);run('ip','addr','add',HOST+'/30','dev',DEV);run('ip','link','set',DEV,'up')
         run('ip','netns','exec',NS,'ip','addr','add',IP+'/30','dev',PEER);run('ip','netns','exec',NS,'ip','link','set',PEER,'up');run('ip','netns','exec',NS,'ip','link','set','lo','up')
         run('nft','list','table','inet','defense_lab')
-        for user in users:
+        for index,user in enumerate(users):
+            if index==4 and cross_boundary:
+                deadline=time.monotonic()+45;identifier=None
+                while time.monotonic()<deadline:
+                    with sqlite3.connect('/var/lib/defense-agent/incidents.db',timeout=10) as db:
+                        row=db.execute("SELECT c.id,count(e.event_id) FROM cases c JOIN case_events e ON e.case_id=c.id WHERE c.kind='ssh_threshold' AND c.subject=? AND c.created_at>=? GROUP BY c.id ORDER BY c.created_at DESC LIMIT 1",(IP,started)).fetchone()
+                        if row and row[1]>=4:
+                            identifier=row[0]
+                            db.execute('UPDATE cases SET created_at=? WHERE id=?',(time.time()-121,identifier))
+                    if identifier:break
+                    time.sleep(.25)
+                if not identifier:raise RuntimeError('First four SSH failures did not reach the fixture case')
             result=run('ip','netns','exec',NS,'ssh','-F','/dev/null','-o','BatchMode=yes','-o','PreferredAuthentications=none','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','GlobalKnownHostsFile=/dev/null','-o','ConnectTimeout=3',user+'@'+HOST,'true',check=False)
             if result.returncode==0:raise RuntimeError('Unexpected successful test login')
         deadline=time.monotonic()+90;case=None
@@ -51,7 +64,7 @@ def main():
         blocked=run('nft','get','element','inet','defense_lab','blocked4','{',IP,'}',check=False)
         assert blocked.returncode!=0
         assert 'Possible SSH password spraying' in '\n'.join(console.case_lines({'cases':[case]},120))
-        print(json.dumps({'test':'live_ssh_distinct_accounts_review_only','passed':True,'accounts':signal['distinct_accounts'],'ip_blocked':False}))
+        print(json.dumps({'test':'live_ssh_distinct_accounts_review_only','passed':True,'accounts':signal['distinct_accounts'],'cross_boundary_simulated':cross_boundary,'ip_blocked':False}))
         print('SSH_SPRAY_LIVE_VERIFIED')
     finally:
         run('ip','netns','delete',NS,check=False);run('ip','link','delete',DEV,check=False)

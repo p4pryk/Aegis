@@ -38,6 +38,33 @@ class SSHPasswordSpray(unittest.TestCase):
         for n in range(8):self.add('same_user',n)
         self.assertEqual(self.snapshot()['signals'],[])
 
+    def test_spray_is_retained_across_case_boundary_and_restart(self):
+        for n in range(4):self.add('user'+str(n),n)
+        original=self.store.db.execute("SELECT id FROM cases WHERE kind='ssh_threshold'").fetchone()[0]
+        self.store.db.execute('UPDATE cases SET created_at=? WHERE id=?',(self.now-121,original));self.store.db.commit()
+        self.engine=agent.CorrelatedEngine(self.engine.c,self.store,None)
+        self.add('user4',4)
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='ssh_threshold' ORDER BY created_at").fetchall()
+        self.assertEqual(len(rows),2);self.assertEqual(rows[0][0],original)
+        latest=self.engine.snapshot(*rows[-1])
+        self.assertEqual(latest['signals'][0]['distinct_accounts'],5);self.assertFalse(latest['allowed_actions'])
+
+    def test_full_case_rolls_over_without_losing_new_failure(self):
+        for n in range(256):self.engine.failure('ssh',self.ip,self.now,'burst-'+str(n),user='same_user')
+        self.engine.failure('ssh',self.ip,self.now,'burst-next',user='new_user')
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='ssh_threshold' ORDER BY created_at").fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertIn('ssh:burst-next',{event['event_id'] for event in self.engine.events(rows[-1][0])})
+        self.assertTrue(all(len(self.engine.events(row[0]))<=256 for row in rows))
+
+    def test_prior_failures_outside_window_are_not_carried_forward(self):
+        for n in range(4):self.engine.failure('ssh',self.ip,self.now-121,'old-'+str(n),user='user'+str(n))
+        self.store.db.execute("UPDATE cases SET created_at=? WHERE kind='ssh_threshold'",(self.now-121,));self.store.db.commit()
+        self.add('user4',4)
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='ssh_threshold' ORDER BY created_at").fetchall()
+        self.assertEqual(len(rows),2);latest=self.engine.snapshot(*rows[-1])
+        self.assertEqual(latest['signals'],[]);self.assertFalse(latest['allowed_actions'])
+
     def test_time_ip_case_and_invalid_names_do_not_inflate_counts(self):
         def event(user,when,ip='192.0.2.25'):
             return {'kind':'ssh_failure','event_time':when,'details':{'ip':ip,'user':user}}
