@@ -42,16 +42,19 @@ def managed(source):
     return [pathlib.Path(p) for p in ('/opt/defense-agent','/etc/defense-agent',*FILES,
         *sorted({'/etc/systemd/system/'+p.name for p in (source/'systemd').glob('*.service')} | {'/etc/systemd/system/defense-alerts.service'}))]
 
-def fingerprint(path):
-    if not path.exists():return None
+def fingerprint(path,include_directories=True):
     if path.is_symlink():raise ValueError('Managed paths must not be symlinks')
+    if not path.exists():return None
     digest=hashlib.sha256()
     info=path.stat();digest.update(str((info.st_mode,info.st_uid,info.st_gid)).encode())
     files=sorted(path.rglob('*')) if path.is_dir() else [path]
     for item in files:
         if item.is_symlink():raise ValueError('Managed tree contains a symlink')
         if '__pycache__' in item.parts:continue
-        if item.is_file():
+        if item.is_dir() and include_directories:
+            info=item.stat();digest.update(b'DIR\0');digest.update(str(item.relative_to(path)).encode())
+            digest.update(str((info.st_mode,info.st_uid,info.st_gid)).encode())
+        elif item.is_file():
             info=item.stat();digest.update(str(item.relative_to(path) if item!=path else item.name).encode())
             digest.update(str((info.st_mode,info.st_uid,info.st_gid)).encode());digest.update(item.read_bytes())
     return digest.hexdigest()
@@ -59,7 +62,7 @@ def fingerprint(path):
 def backup(source):
     ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
     directory=ROOT/(str(time.time_ns()));directory.mkdir(mode=0o700)
-    manifest={'files':[],'services':{}}
+    manifest={'fingerprint_version':2,'files':[],'services':{}}
     for index,path in enumerate(managed(source)):
         fingerprint(path)
         entry={'path':str(path),'backup':str(index),'exists':path.exists()}
@@ -80,9 +83,14 @@ def load(directory):
     if directory.parent!=ROOT.resolve() or not directory.name.isdigit():raise ValueError('Unknown release backup')
     return json.loads((directory/'manifest.json').read_text())
 
+def fingerprint_options(manifest):
+    version=manifest.get('fingerprint_version',1)
+    if type(version) is not int or version not in (1,2):raise ValueError('Unknown release fingerprint version')
+    return {'include_directories':version==2}
+
 def seal(directory):
     manifest=load(directory)
-    manifest['installed']={e['path']:fingerprint(pathlib.Path(e['path'])) for e in manifest['files']}
+    manifest['installed']={e['path']:fingerprint(pathlib.Path(e['path']),**fingerprint_options(manifest)) for e in manifest['files']}
     (directory/'manifest.json').write_text(json.dumps(manifest))
 
 def restore(directory,failed=False):
@@ -90,7 +98,7 @@ def restore(directory,failed=False):
     if not failed:
         if 'installed' not in manifest:raise ValueError('Incomplete deployment; use recover after inspecting installation failure')
         for path,expected in manifest['installed'].items():
-            if fingerprint(pathlib.Path(path))!=expected:raise ValueError('Managed files changed since installation; preserve operator changes before rollback')
+            if fingerprint(pathlib.Path(path),**fingerprint_options(manifest))!=expected:raise ValueError('Managed files changed since installation; preserve operator changes before rollback')
     for unit in UNITS:
         if run('systemctl','is-active',unit).returncode==0 and run('systemctl','stop',unit).returncode:
             raise RuntimeError('Cannot safely stop '+unit)
@@ -120,7 +128,7 @@ def uninstall(directory):
     if not installed:raise ValueError('A sealed release backup is required')
     paths=[pathlib.Path(e['path']) for e in manifest['files'] if e['path']!='/etc/defense-agent']
     for path in paths:
-        if fingerprint(path)!=installed[str(path)]:raise ValueError('Managed files changed; inspect before uninstalling')
+        if fingerprint(path,**fingerprint_options(manifest))!=installed[str(path)]:raise ValueError('Managed files changed; inspect before uninstalling')
     for unit in UNITS:
         if run('systemctl','is-active',unit).returncode==0 and run('systemctl','stop',unit).returncode:raise RuntimeError('Cannot stop '+unit)
         run('systemctl','disable',unit)

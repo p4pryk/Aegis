@@ -188,7 +188,7 @@ The installer checks platform/configuration/free space, snapshots managed code/c
 sudo python3 aegis/lifecycle.py rollback /var/lib/defense-agent-releases/BACKUP_ID
 ```
 
-Rollback refuses if managed files changed after installation, preserving operator edits. `recover` is for an inspected, incomplete deployment. `uninstall BACKUP_PATH` removes verified managed code, units and sensor configuration while retaining incident data, configuration, receipts and release backups. It does not restore disabled application accounts or remove independent firewall rules. Existing timed AEGIS IP blocks retain their expiry; loaded audit rules can remain until reboot. Deployment snapshots contain private configuration and must not be committed or shared. Package installation itself is not reversed, and database schema downgrades are not promised.
+Rollback refuses if managed files changed after installation, preserving operator edits. New deployment snapshots also detect nested directory ownership, permissions and empty-directory additions or removals. Snapshots created before this change retain their original file-focused checks and cannot detect every nested-directory change. `recover` is for an inspected, incomplete deployment. `uninstall BACKUP_PATH` removes verified managed code, units and sensor configuration while retaining incident data, configuration, receipts and release backups. It does not restore disabled application accounts or remove independent firewall rules. Existing timed AEGIS IP blocks retain their expiry; loaded audit rules can remain until reboot. Deployment snapshots contain private configuration and must not be committed or shared. Package installation itself is not reversed, and database schema downgrades are not promised.
 
 ### Local incident handling
 
@@ -411,6 +411,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-10 — Guard nested directories during rollback
+
+- Include nested directory metadata and empty directories in fingerprints for new deployment snapshots. Refuse changed managed directories and broken symlinks; continue validating older snapshots with their original fingerprint algorithm.
+- Validation: four focused unit tests and nine live installation/rollback/uninstall checks passed on the Azure Linux VM. Compatibility with older snapshot manifests and refusal of nested directory changes were exercised in isolated fixtures. The local full suite passed 266 tests, with six Linux/root-only tests skipped.
 
 ### 2026-11-10 — SSH spray continuity across cases
 
