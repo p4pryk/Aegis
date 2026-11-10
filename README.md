@@ -156,6 +156,15 @@ sudo python3 /opt/defense-agent/maintenance.py CASE_ID --output /secure/path/inc
 
 The export includes the case, normalized evidence, assessment history, response attempts and timings, creates a private file, and refuses to overwrite an existing path. Automatic retention is not an off-VM archive.
 
+For a local, read-only configuration and collector status check:
+
+```bash
+sudo python3 /opt/defense-agent/doctor.py
+sudo python3 /opt/defense-agent/doctor.py --json
+```
+
+The diagnostic reads local configuration and health metadata without network calls or printing model settings. It reports missing or stale information as unknown. Exit code `0` means all checks are currently OK; `1` means at least one warning or unknown result. Model connectivity is not tested, and a quiet collector does not prove that an application emits logs.
+
 ## Release candidate: Linux deployment contract
 
 This working release targets **Ubuntu 24.04, x86_64, systemd**. Full model-backed validation currently uses the Azure VM and its managed identity. Other distributions are not yet validated; the installer refuses them before modifying the host. AEGIS does not detect every attack or read every possible log. Its coverage inventory, source health and queue warnings describe the limits of the available evidence. Arbitrary application business logic, encrypted payloads, nonstandard log formats and container-internal events require additional instrumentation.
@@ -411,6 +420,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-10 — Local diagnostics
+
+- Add a read-only terminal and JSON diagnostic for policy/source configuration, collector health and model-worker status. Do not print model configuration or contact an external service; report unavailable evidence as unknown.
+- Validation: eight diagnostic, three installation-profile and 15 source-health unit tests passed on the Azure Linux VM. Live checks verified missing inputs, secret-free output, installed source identity and detection/recovery of a deliberately suspended SSH journal reader. The local full suite passed 274 tests, with six Linux/root-only tests skipped.
 
 ### 2026-11-10 — Guard nested directories during rollback
 
