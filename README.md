@@ -423,6 +423,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-13 — Enrich SSH sessions with security signals
+
+- Include authorization denials, security-sensor failures and kernel security reports in bounded SSH session context when boot ID, audit session and login UID match. Session attribution does not establish causation or authorize a response; generic warnings remain outside this enrichment.
+- Validation: 14 telemetry and 17 system-source unit tests passed on the Azure Linux VM. Fourteen live checks exercised real SSH, sudo, group and file changes, including synthetic Polkit-tagged journal records emitted in two separate real sessions. The model-backed check was intentionally skipped in this run.
+
 ### 2026-11-10 — Graceful collector and response shutdown
 
 - Finish the current core loop and close database connections on normal termination. Finish the current response step, preserve pending work for revalidation and show a stopped worker as unavailable in the terminal.

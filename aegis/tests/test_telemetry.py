@@ -110,3 +110,25 @@ class Telemetry(unittest.TestCase):
         event=self.e.normalize('service_event','fixture.service',{'boot_id':self.e.boot_id,'audit_session':'42','auid':'1002'},'service',self.now)
         self.e.remember(event)
         self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['service'])
+
+    def test_polkit_context_joins_only_matching_audit_session(self):
+        self.login();self.change()
+        for session,cursor in (('42','matching'),('99','other')):
+            raw={'_BOOT_ID':self.e.boot_id,'_COMM':'polkitd','SYSLOG_IDENTIFIER':'polkitd',
+                 '_AUDIT_SESSION':session,'_AUDIT_LOGINUID':'1002',
+                 'MESSAGE':'Operator FAILED to authenticate for action PRIVATE_ACTION',
+                 '__CURSOR':cursor,'__REALTIME_TIMESTAMP':str(int((self.now-1)*1e6))}
+            self.e.journal_context(raw)
+        telemetry.enrich(self.e,self.now+3)
+        row=self.e.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='host_change'").fetchone()
+        snapshot=self.e.snapshot(*row);events=snapshot['events'];ids={e['event_id'] for e in events}
+        self.assertIn('journal:matching',ids);self.assertNotIn('journal:other',ids)
+        self.assertNotIn('PRIVATE_ACTION',json.dumps(snapshot));self.assertFalse(snapshot['allowed_actions'])
+        self.assertTrue(any(edge['to']=='journal:matching' and edge['relation']=='exact_audit_session_attribution_not_causal' for edge in snapshot['edges']))
+
+    def test_new_security_context_excludes_other_boot_and_unset_identity(self):
+        login=self.e.normalize('ssh_session_open','session',{'boot_id':self.e.boot_id,'session':'42','auid':'1002'},'login',self.now-2)
+        for n,(boot,session) in enumerate(((self.e.boot_id,'42'),('other','42'),(self.e.boot_id,'4294967295'))):
+            event=self.e.normalize('system_sensor_failure','auditd',{'boot_id':boot,'audit_session':session,'auid':'1002'},'sensor:'+str(n),self.now)
+            self.e.remember(event)
+        self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['sensor:0'])

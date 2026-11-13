@@ -2,7 +2,7 @@
 """Real SSH, sudo, group and file metadata test on the isolated training VM only."""
 import json,os,pathlib,pwd,shutil,sqlite3,subprocess,sys,time
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
-import console
+import console,telemetry
 
 DB='/var/lib/defense-agent/incidents.db'
 results=[];suffix=str(time.time_ns())[-9:];actor='lab_tel_'+suffix;group='lab_tg_'+suffix
@@ -59,10 +59,14 @@ def main():
     cmd(['visudo','-cf',str(sudo)])
     prefix=['ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=3','-i',str(root/'key'),actor+'@127.0.0.1']
     started=time.time()
-    idle=subprocess.Popen(prefix+['sudo /usr/bin/true; sleep 90'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);processes.append(idle)
+    idle=subprocess.Popen(prefix+['logger -t polkitd "Operator FAILED to authenticate for action AEGIS_OTHER_SESSION"; sudo /usr/bin/true; sleep 90'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);processes.append(idle)
     sessions=lambda:query("SELECT * FROM ssh_sessions WHERE event_time>=? AND json_extract(details_json,'$.user')=?",(started,actor))
     idle_session=wait(sessions)[0]['identity']
-    cmd(prefix+['sudo /usr/bin/python3 '+str(script)])
+    def idle_polkit():
+        rows=query("SELECT details_json FROM correlation_events WHERE kind='system_authorization_denied' AND event_time>=?",(started,))
+        return any(':'.join(telemetry.identity(json.loads(row['details_json'])) or ())==idle_session for row in rows)
+    wait(idle_polkit)
+    cmd(prefix+['logger -t polkitd "Operator FAILED to authenticate for action AEGIS_MATCHING_SESSION"; sudo /usr/bin/python3 '+str(script)])
     changes=lambda:query("SELECT * FROM correlation_events WHERE event_time>=? AND kind IN ('identity_change','security_file_change','persistence_change')",(started,))
     def complete():
         rows=changes();paths={json.loads(r['details_json']).get('path') for r in rows}
@@ -76,10 +80,13 @@ def main():
         for case in cases():
             events=json.loads(case['evidence_json']).get('events',[])
             kinds={e['kind'] for e in events};paths={e['details'].get('path') for e in events}
-            if {'ssh_session_open','sudo_command','identity_change'}<=kinds and {str(rule),str(cron),str(unit)}<=paths:return case
+            if {'ssh_session_open','sudo_command','identity_change','system_authorization_denied'}<=kinds and {str(rule),str(cron),str(unit)}<=paths:return case
     case=wait(linked);evidence=json.loads(case['evidence_json']);events=evidence['events']
     check('One chain joins SSH sudo group and persistence files',bool(events))
     check('Other session on same user and IP excluded',all(e['subject']!=idle_session for e in events) and idle.poll() is None)
+    polkit=[e for e in events if e['kind']=='system_authorization_denied']
+    check('Polkit context matches this audit session and excludes the other',bool(polkit) and all(':'.join(telemetry.identity(e['details']) or ())!=idle_session for e in polkit))
+    check('Producer-reported Polkit text is not retained','AEGIS_MATCHING_SESSION' not in json.dumps(evidence) and 'AEGIS_OTHER_SESSION' not in json.dumps(evidence))
     check('Changes alone authorize no response',not evidence['allowed_actions'] and case['status'] not in ('recognized','defended'))
     check('Session attribution labelled without causal overclaim',any(e['relation']=='exact_audit_session_attribution_not_causal' for e in evidence['edges']))
     text='\n'.join(console.chain_lines({'cases':[case]},120,case['id']))
@@ -92,8 +99,9 @@ def main():
     def assessed():
         rows=query('SELECT * FROM cases WHERE id=?',(case['id'],))
         return rows[0] if rows and json.loads(rows[0]['analysis_json']).get('summary') else None
-    assessed_case=wait(assessed,120)
-    check('Real model describes the chain without authorizing new actions',not json.loads(assessed_case['analysis_json']).get('proposed_actions') and assessed_case['status'] not in ('recognized','defended'))
+    if '--skip-model' not in sys.argv:
+        assessed_case=wait(assessed,120)
+        check('Real model describes the chain without authorizing new actions',not json.loads(assessed_case['analysis_json']).get('proposed_actions') and assessed_case['status'] not in ('recognized','defended'))
     (root/'chain.txt').write_text(text)
     pathlib.Path('/tmp/aegis-telemetry-chain.txt').write_text(text)
 
