@@ -3,6 +3,23 @@ from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import agent,persistence
 class PersistenceTests(unittest.TestCase):
+    def test_incomplete_overloaded_and_oversized_audit_groups_report_durable_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config=dict(agent.DEFAULTS,data_dir=directory,persistence_enabled=True)
+            store=agent.Store(config);engine=agent.CorrelatedEngine(config,store,None)
+            try:
+                now=time.time();stamp=str(now);engine.persistence_pending={'old':{'received':now-601}}
+                persistence.audit(engine,'EOE',stamp,'1','')
+                engine.persistence_pending={str(n):{'received':now} for n in range(512)}
+                persistence.audit(engine,'SYSCALL',stamp,'2','success=yes pid=123 key="aegis_identity"')
+                key=engine.boot_id+':'+stamp+':3'
+                engine.persistence_pending={key:{'received':now,'paths':[['/etc/passwd','NORMAL',{}]]*16}}
+                persistence.audit(engine,'PATH',stamp,'3','name="/etc/shadow" nametype=NORMAL')
+                gap=store.state('audit_assembly_gap')
+                self.assertEqual((gap['expired_groups'],gap['rejected_groups'],gap['excess_paths']),(1,1,1))
+                self.assertNotIn('/etc/shadow',str(gap))
+                self.assertEqual(agent.CorrelatedEngine(config,store,None).store.state('audit_assembly_gap'),gap)
+            finally:store.db.close()
     def test_suspicious_case_display_without_destructive_action(self):
         from presentation import case_display
         for kind in ('application_shell','persistence_change','app_sql_login'):

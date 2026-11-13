@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Check a real failed-then-successful SSH sequence in an isolated lab namespace."""
-import json,os,pathlib,pwd,shutil,socket,sqlite3,subprocess,tempfile,time
+import json,os,pathlib,pwd,shutil,socket,sqlite3,subprocess,sys,tempfile,time
+sys.path.insert(0,'/opt/defense-agent')
+import agent
 
 DB='/var/lib/defense-agent/incidents.db';checks=[]
 def cmd(args,check=True):return subprocess.run(args,check=check,capture_output=True,text=True,timeout=20)
@@ -45,6 +47,21 @@ def main():
         check('Same-account and same-IP pattern appears in incident evidence',any(s['kind']=='ssh_success_after_failures' for s in evidence['signals']))
         check('Pattern alone authorizes no action',not evidence['allowed_actions'])
         check('Source is not blocked for the pattern alone',cmd(['nft','get','element','inet','defense_lab','blocked4','{',ip,'}'],False).returncode!=0)
+        # Replay real normalized SSH records out of order into a disposable database.
+        records=query("SELECT kind,event_time,event_id FROM correlation_events WHERE kind IN ('ssh_failure','ssh_success') AND subject=? AND event_time>=? AND json_extract(details_json,'$.user')=? ORDER BY event_time",(ip,started,user))
+        success=next(row for row in records if row[0]=='ssh_success');failures=[row for row in records if row[0]=='ssh_failure']
+        isolated=root/'isolated';isolated.mkdir();config=dict(agent.DEFAULTS,data_dir=str(isolated),protected_ips=[])
+        store=agent.Store(config)
+        try:
+            engine=agent.CorrelatedEngine(config,store,None)
+            engine.ssh_success(ip,user,success[1],success[2])
+            store.db.execute("UPDATE cases SET created_at=? WHERE kind='ssh_threshold'",(time.time()-121,));store.db.commit()
+            engine=agent.CorrelatedEngine(config,store,None)
+            for _,stamp,identifier in failures:engine.failure('ssh',ip,stamp,identifier,user=user)
+            row=store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='ssh_threshold' ORDER BY created_at DESC LIMIT 1").fetchone()
+            replay=engine.snapshot(*row)
+            check('Real SSH records rejoin after out-of-order replay and restart',any(s['kind']=='ssh_success_after_failures' for s in replay['signals']) and not replay['allowed_actions'])
+        finally:store.db.close()
     finally:
         if process:
             process.terminate()

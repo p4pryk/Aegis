@@ -58,4 +58,31 @@ class SSHSuccessContext(unittest.TestCase):
         self.engine.ssh_success(self.ip,'alice',self.now,'success')
         self.assertEqual(self.latest()['signals'],[])
 
+    def test_delayed_failures_rejoin_success_after_case_boundary_and_restart(self):
+        self.engine.ssh_success(self.ip,'alice',self.now,'success')
+        self.store.db.execute("UPDATE cases SET created_at=? WHERE kind='ssh_threshold'",(self.now-121,));self.store.db.commit()
+        self.engine=agent.CorrelatedEngine(self.engine.c,self.store,None)
+        for n in range(5):self.failure('alice',n,offset=-100+n)
+        evidence=self.latest()
+        self.assertIn({'kind':'ssh_success_after_failures','failure_count':5,'window_seconds':300},evidence['signals'])
+        self.assertEqual(evidence['allowed_actions'],[])
+
+    def test_delayed_failures_do_not_join_other_account_source_or_later_attempts(self):
+        self.engine.ssh_success(self.ip,'alice',self.now-2,'success')
+        for n in range(5):self.failure('Alice',n,offset=-10)
+        for n in range(5,10):self.failure('alice',n,offset=-10,ip='192.0.2.71')
+        for n in range(10,15):self.failure('alice',n,offset=-1)
+        self.assertFalse(any(s['kind']=='ssh_success_after_failures' for s in self.latest()['signals']))
+
+    def test_incoming_failure_is_not_displaced_by_context_at_case_capacity(self):
+        self.engine.ssh_success(self.ip,'alice',self.now-2,'success')
+        identifier=self.store.db.execute("SELECT id FROM cases WHERE kind='ssh_threshold'").fetchone()[0]
+        for n in range(254):
+            self.store.db.execute('INSERT INTO case_events VALUES (?,?,?,?,?,?)',(identifier,'filler'+str(n),self.now-3,'ssh_failure',self.ip,json.dumps({'user':'bob','ip':self.ip})))
+        self.store.db.commit()
+        other=self.engine.normalize('ssh_failure',self.ip,{'user':'alice','ip':self.ip},'unattached',self.now-1)
+        self.engine.remember(other)
+        self.engine.failure('ssh',self.ip,self.now,'boundary',user='alice')
+        self.assertIsNotNone(self.store.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(identifier,'ssh:boundary')).fetchone())
+
 if __name__=='__main__':unittest.main()

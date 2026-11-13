@@ -43,6 +43,26 @@ class Coverage(unittest.TestCase):
         with patch.object(coverage,'command',side_effect=['Id=nginx.service\nLoadState=loaded\nActiveState=active\n','-w /secret-file -p wa -k aegis_identity\n-a always,exit -S execve -F key=lab_root_exec']):
             facts=coverage.inventory()
         self.assertEqual(facts['rules'],['aegis_identity','lab_root_exec']);self.assertNotIn('secret-file',str(facts))
+    def test_auth_watch_checks_path_permissions_and_key_without_exposing_other_paths(self):
+        rules='\n'.join(('-w /etc/ssh/sshd_config -p wa -k aegis_identity','-w /etc/pam.d -p w -k aegis_identity','-w /etc/security/access.conf -p wa -k another_key','-w /not-public -p wa -k aegis_identity'))
+        with patch.object(coverage,'command',side_effect=['Id=sshd.service\nLoadState=loaded\nActiveState=active\n',rules]):facts=coverage.inventory()
+        self.assertTrue(facts['identity_watches']['/etc/ssh/sshd_config'])
+        self.assertFalse(facts['identity_watches']['/etc/pam.d'])
+        self.assertFalse(facts['identity_watches']['/etc/security/access.conf'])
+        self.assertNotIn('/not-public',str(facts))
+        self.facts.update(facts)
+        files={p:{'kind':'file'} for p in coverage.AUTH_WATCHES}
+        rows={r['name']:r['status'] for r in self.assess({'persistence_enabled':True},files)['rows']}
+        self.assertEqual(rows['Auth watch /etc/ssh/sshd_config'],'WATCH PRESENT')
+        self.assertEqual(rows['Auth watch /etc/pam.d'],'RULES MISSING')
+        self.assertEqual(rows['Auth watch /etc/security/access.conf'],'RULES MISSING')
+        files['/etc/pam.d']={'kind':'missing'}
+        self.assertEqual(next(r['status'] for r in self.assess({'persistence_enabled':True},files)['rows'] if r['name']=='Auth watch /etc/pam.d'),'MISSING')
+        self.facts['identity_watches']=None
+        self.assertEqual(next(r['status'] for r in self.assess({'persistence_enabled':True},files)['rows'] if r['name']=='Auth watch /etc/ssh/sshd_config'),'UNKNOWN')
+
+    def test_disabled_file_sensor_is_visible(self):
+        self.assertEqual(next(r['status'] for r in self.assess()['rows'] if r['name']=='Authentication configuration watches'),'DISABLED')
     def test_probe_never_blocks_intake_or_spawns_duplicate_worker(self):
         started=threading.Event();release=threading.Event();probe=coverage.Probe({})
         def slow():started.set();release.wait(3);return self.facts
@@ -65,7 +85,7 @@ class Coverage(unittest.TestCase):
             for p in (fifo,link):self.assertEqual(coverage.metadata(p)['kind'],'unsafe')
     def test_collector_gaps_remain_review_items(self):
         self.health['sources'][0]['status']='GAP'
-        report=self.assess();self.assertEqual(report['gaps'],1)
+        report=self.assess();self.assertEqual(report['gaps'],2)
         self.assertTrue(any(getattr(line,'level',None)=='warning' and '[GAP]' in line for line in coverage.lines(report,104,100)))
     def test_source_screen_safely_renders_report(self):
         report=self.assess();report['rows'][0]['name']='test\x1b[2J'

@@ -399,7 +399,7 @@ Press **5** or start the console with `--sources`. The fixed header includes a c
 | `STALE` | Core health is older than 15 seconds; last-known source status is not current. |
 | `UNKNOWN` | No source-health snapshot is available yet. |
 
-The **COVERAGE CHECK** at the top is a configuration inventory, refreshed every 60 seconds by one background worker. It inspects fixed service-name/path hints for Nginx, Apache, PostgreSQL, MySQL/MariaDB, Redis and container runtimes, plus up to eight explicitly configured application files. It checks selected audit rule keys and current collector configuration. Commands have three-second timeouts; slow discovery does not block intake or spawn overlapping workers. Inventory older than 120 seconds, or a stale core heartbeat, is shown as unknown.
+The **COVERAGE CHECK** at the top is a configuration inventory, refreshed every 60 seconds by one background worker. It inspects fixed service-name/path hints for Nginx, Apache, PostgreSQL, MySQL/MariaDB, Redis and container runtimes, plus up to eight explicitly configured application files. It checks selected audit rule keys, expected SSH/PAM file watches and current collector configuration. Commands have three-second timeouts; slow discovery does not block intake or spawn overlapping workers. Inventory older than 120 seconds, or a stale core heartbeat, is shown as unknown.
 
 | Coverage state | Meaning |
 | --- | --- |
@@ -410,18 +410,26 @@ The **COVERAGE CHECK** at the top is a configuration inventory, refreshed every 
 | `PARTIAL` | Some matching adapters exist; other virtual hosts, database streams or application events may still be missing. |
 | `FORMAT REVIEW` | Invalid or unrecognized records were reported; inspect the producer format and mapping. |
 | `MISSING` / `UNSAFE` | A configured file is absent, not regular, has an unexpected owner or allows group/world writes. |
-| `KEYS PRESENT` / `RULES MISSING` | Selected audit keys exist or are absent. Key presence does not validate the exact syscall filters or watched paths. |
+| `KEYS PRESENT` / `RULES MISSING` | Selected audit keys exist or are absent, or an expected file-watch rule was not found. Other rule forms require manual verification. |
+| `WATCH PRESENT` | The expected path, write/attribute permissions and audit key are present in a recognized watch rule; this does not prove event delivery. |
 | `UNKNOWN` | Inventory, metadata or current health could not be established. |
 
 Discovery reads service properties, audit rule metadata and file metadata only. It never reads additional log contents, scans directories recursively, installs software or enables sources. Service journals do not establish HTTP access, database query/audit or container application coverage. Native database/runtime formats need supported exports or new parsers. Custom service names, virtual-host paths, remote logging and unknown applications remain outside automatic discovery; there is no claim of coverage of every Linux application. Collector state below the inventory remains sampled every five seconds; a quiet configured source is distinct from a missing source.
 
-`aegis/live-coverage-tests.py` checks the installed background report and real inventory commands, then exercises temporary file adapters through missing, quiet, observed, invalid-format and unsafe states without altering live source configuration.
+`aegis/live-coverage-tests.py` checks the installed background report and real inventory commands, then exercises temporary file adapters through missing, quiet, observed, invalid-format and unsafe states without altering live source configuration. `aegis/live-coverage-integrity-tests.py` checks installed authentication watches and uses an isolated database to verify that an audit assembly gap remains visible and fails the continuity gate.
 
-Health is sampled every five seconds; the kernel audit status probe runs every 30 seconds. Process checks include PID birth identity and detect a stopped process even when its pipe still exists. The application checks the HTTP service and broker as well as the file reader; application backlog delay is the duration of a nonempty byte backlog. Cursor/file gaps remain warnings after recovery, including core restarts. A running collector does not prove every service emits logs: this screen describes the configured sources, not all logs on the machine. It is local status only, without an external heartbeat or alerts.
+Health is sampled every five seconds; the kernel audit status probe runs every 30 seconds. Process checks include PID birth identity and detect a stopped process even when its pipe still exists. The application checks the HTTP service and broker as well as the file reader; application backlog delay is the duration of a nonempty byte backlog. Cursor/file gaps and incomplete, rejected or oversized file-audit assemblies remain warnings after recovery, including core restarts. A running collector does not prove every service emits logs: this screen describes the configured sources, not all logs on the machine. It is local status only, without an external heartbeat or alerts.
 
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-13 — Correlation and collection integrity
+
+- Rejoin delayed SSH failures to a previously processed success for the same exact account and source within the bounded 300-second window, including across case boundaries and collector restarts. Preserve the incoming SSH event when a case approaches its event limit. This remains a review signal and does not authorize containment.
+- Show expected SSH/PAM audit file watches individually in coverage checks, including missing, unsafe, unknown and disabled states. A recognized rule is configuration evidence, not proof of event delivery; other rule forms require manual verification.
+- Record expired, rejected and over-limit file-audit assemblies as durable metadata-only gap counters. Surface historical assembly gaps in kernel-audit source health so the continuity gate does not silently pass a known gap.
+- Validation: all 299 unit tests passed on the Azure Linux VM without skips; locally 293 passed and six Linux/root-only tests were skipped. Seventeen live checks passed: five with real SSH and isolated out-of-order replay, seven for installed watch inventory and simulated missing-rule/assembly-gap scenarios in a disposable database, and five using real SSH/PAM fixture-file changes. No automated response was authorized by these scenarios.
 
 ### 2026-11-13 — Observe SSH and PAM configuration changes
 

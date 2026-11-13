@@ -41,6 +41,20 @@ class SourceHealth(unittest.TestCase):
         self.store.state('app_source_gap',{'time':self.now-100})
         self.assertEqual(self.states()[3]['status'],'GAP')
 
+    def test_audit_file_assembly_loss_is_visible_and_remains_after_recovery(self):
+        self.c['persistence_enabled']=True
+        self.store.state('audit_assembly_gap',{'time':self.now-60,'rejected_groups':1})
+        row=self.states()[0]
+        self.assertEqual(row['status'],'GAP');self.assertIn('file audit assembly gap: recorded',row['reason'])
+        self.e=agent.CorrelatedEngine(self.c,self.store,None)
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        self.c['persistence_enabled']=False
+        self.assertEqual(self.states()[0]['status'],'QUIET')
+        self.c['persistence_enabled']=True
+        self.store.db.execute("DELETE FROM state WHERE key='audit_assembly_gap'");self.store.db.commit()
+        self.store.state('persistence_incomplete',{'time':self.now-100,'expired_groups':1})
+        self.assertEqual(self.states()[0]['status'],'GAP')
+
     def test_disabled_sources_are_explicit(self):
         self.c.update(system_logs_enabled=False,application_enabled=False,journal_units=[],journal_identifiers=[],journal_comms=[])
         rows=self.states();self.assertEqual(rows[2]['status'],'DISABLED');self.assertEqual(rows[3]['status'],'DISABLED')

@@ -71,7 +71,10 @@ def source_states(engine,spool,journals,pending,now,kernel_status=None):
     audit=engine.store.state('sensor_health') or {}
     kernel=audit.get('audit',{}) if kernel_status is None else kernel_status
     alive=producer.get('start_ticks') is not None and producer.get('boot_id')==engine.boot_id and process_state(producer.get('pid'),producer.get('start_ticks'))=='running' and service_active('auditd.service') and kernel.get('enabled') in ('1','2')
-    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or int(kernel.get('lost',0))), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; check audit history")
+    assembly=engine.store.state('audit_assembly_gap') or {}
+    legacy=engine.store.state('persistence_incomplete') or engine.store.state('persistence_overload')
+    assembly_loss=engine.c.get('persistence_enabled',False) and bool(assembly or legacy)
+    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or int(kernel.get('lost',0)) or assembly_loss), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; file audit assembly gap: {'recorded' if assembly_loss else 'none'}; check audit history")
     journal_active=service_active('systemd-journald.service')
     for key,name in (('ssh','SSH journal'),('journal_context','Service journal')):
         h=journals[key];count,age=pending.get(key,(0,0))

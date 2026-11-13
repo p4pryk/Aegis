@@ -1,5 +1,7 @@
 """Bounded metadata-only coverage inventory. Never enables sources or reads log contents."""
-import os,pathlib,re,stat,subprocess,threading,time
+import os,pathlib,re,shlex,stat,subprocess,threading,time
+
+AUTH_WATCHES=('/etc/ssh/sshd_config','/etc/ssh/sshd_config.d','/etc/pam.d','/etc/security/access.conf')
 
 CATALOG=(
  ('Nginx',('nginx.service',),('/var/log/nginx/access.log','/var/log/nginx/error.log'),'Access logs can use the access adapter; error logs need a supported structured export.'),
@@ -34,7 +36,17 @@ def inventory():
             if fields.get('Id') in units:services[fields['Id']]=fields
     rules=command(['auditctl','-l'])
     keys=None if rules is None else sorted(set(re.findall(r'(?:-k\s+|key=)"?([A-Za-z0-9_-]+)',rules)))
-    return dict(services=services,services_available=raw is not None and bool(services),rules=keys)
+    watches=None
+    if rules is not None:
+        watches={path:False for path in AUTH_WATCHES}
+        try:
+            for line in rules.splitlines():
+                args=shlex.split(line)
+                if '-w' not in args or '-p' not in args or '-k' not in args:continue
+                path=args[args.index('-w')+1];perms=args[args.index('-p')+1];key=args[args.index('-k')+1]
+                if path in watches and key=='aegis_identity' and set('wa')<=set(perms):watches[path]=True
+        except (ValueError,IndexError):watches=None
+    return dict(services=services,services_available=raw is not None and bool(services),rules=keys,identity_watches=watches)
 
 def assess(config,health,facts,inspect=metadata,now=None):
     now=time.time() if now is None else now;rows=[]
@@ -58,6 +70,14 @@ def assess(config,health,facts,inspect=metadata,now=None):
     add('Selected audit rules','UNKNOWN' if keys is None else 'RULES MISSING' if missing else 'KEYS PRESENT',
         'Audit rules could not be inspected' if keys is None else 'Missing keys: '+', '.join(missing) if missing else ', '.join(required),
         'Verify the actual rule filters and watched paths; key presence alone does not establish full syscall/file coverage.')
+    if not config.get('persistence_enabled',False):
+        add('Authentication configuration watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
+    else:
+        watches=facts.get('identity_watches')
+        for path in AUTH_WATCHES:
+            kind=inspect(path).get('kind','unknown')
+            status=('MISSING' if kind=='missing' else 'UNSAFE' if kind=='unsafe' else 'UNKNOWN' if kind not in ('file','directory') or watches is None else 'WATCH PRESENT' if watches.get(path) else 'RULES MISSING')
+            add('Auth watch '+path,status,path,'Only the expected write/attribute watch and key are checked; audit health and actual event delivery must also be verified.' if status=='WATCH PRESENT' else 'Inspect this path and its audit rules; absent paths need a watch after they are created. Other rule forms require manual verification.')
     configured=[]
     for item in config.get('application_sources',[])[:8]:
         path=item['path'];info=inspect(path);source=sources.get('App '+item['name'],{})

@@ -64,18 +64,24 @@ def audit_text(value):
     except (ValueError,UnicodeError):return None
 
 
+def assembly_gap(engine,kind,count=1):
+    state=engine.store.state('audit_assembly_gap') or {}
+    state[kind]=state.get(kind,0)+count;state['time']=time.time()
+    engine.store.state('audit_assembly_gap',state)
+
+
 def audit(engine,kind,stamp,serial,content):
     if kind not in ('SYSCALL','1300','PATH','1302','CWD','1307','EOE','1320'):return
     now=time.time();pending=getattr(engine,'persistence_pending',{});engine.persistence_pending=pending
     expired=[k for k,v in pending.items() if now-v['received']>600]
     for key in expired:pending.pop(key)
-    if expired:engine.store.state('persistence_incomplete',{'time':time.time(),'expired_groups':len(expired)})
+    if expired:assembly_gap(engine,'expired_groups',len(expired))
     key=engine.boot_id+':'+stamp+':'+serial
     fields=dict(re.findall(r'(\w+)=("[^"]*"|\S+)',content))
     if kind in ('SYSCALL','1300'):
         fields={k:v.strip('"') for k,v in fields.items()}
         if fields.get('key') not in ('aegis_persistence','aegis_identity') or fields.get('success')!='yes':return
-        if len(pending)>=512:engine.store.state('persistence_overload',{'time':time.time()});return
+        if len(pending)>=512:assembly_gap(engine,'rejected_groups');return
         pid=int(fields['pid']);snap=engine.audit_snapshot(pid) or {}
         pending[key]={'received':now,'paths':[],'details':{'pid':pid,'boot_id':engine.boot_id,'uid':fields.get('uid'),'auid':fields.get('auid'),'session':fields.get('ses'),'exe':fields.get('exe'),'syscall':fields.get('syscall'),'source':'auditd','start_ticks':snap.get('start_ticks'),'cgroup':snap.get('cgroup')}}
     elif kind in ('CWD','1307') and key in pending:
@@ -83,7 +89,8 @@ def audit(engine,kind,stamp,serial,content):
         if cwd and cwd.startswith('/'):pending[key]['cwd']=cwd
     elif kind in ('PATH','1302') and key in pending:
         path=audit_text(fields.get('name',''))
-        if not path or len(pending[key]['paths'])>=16:return
+        if not path:return
+        if len(pending[key]['paths'])>=16:assembly_gap(engine,'excess_paths');return
         # Resolve relative names only when the same audit event supplies a CWD.
         metadata={k:fields[k].strip('"') for k in ('mode','ouid','ogid') if k in fields}
         pending[key]['paths'].append([path,fields.get('nametype','UNKNOWN'),metadata])

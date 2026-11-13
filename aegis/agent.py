@@ -304,7 +304,9 @@ class CorrelatedEngine:
             root=self.db.execute('SELECT root_id FROM case_parts WHERE case_id=?',(identifier,)).fetchone()[0]
             extra=[e for e in extra if not self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE e.event_id=? AND p.root_id=? AND p.case_id!=? LIMIT 1',(e['event_id'],root,identifier)).fetchone()]
         changed=False
-        for e in ([event,*extra] if continuation_kind else [identity_event,*extra,event] if identity_event is not event else [*extra,event]):
+        if kind=='ssh_threshold':ordered=[identity_event,event,*extra] if identity_event is not event else [event,*extra]
+        else:ordered=[event,*extra] if continuation_kind else [identity_event,*extra,event] if identity_event is not event else [*extra,event]
+        for e in ordered:
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
             if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
@@ -330,7 +332,22 @@ class CorrelatedEngine:
                 if eid!=event['event_id'] and isinstance(name,str) and re.fullmatch(r'[A-Za-z0-9_.@-]{1,64}',name):
                     accounts.setdefault(name.casefold(),dict(event_id=eid,event_time=stamp,kind=ev_kind,subject=subject,details=details))
                 if len(accounts)>=31:break
-            self.create_or_append('ssh_threshold',ip,event,list(accounts.values()))
+            extra=list(accounts.values())
+            # A journal replay may deliver an earlier failure after its later success.
+            # Rejoin only the exact account/source and bounded event-time window.
+            if isinstance(user,str) and re.fullmatch(r'[A-Za-z0-9_.@-]{1,64}',user):
+                success=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='ssh_success' AND subject=? AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.user')=? ORDER BY event_time LIMIT 1",(ip,timestamp,timestamp+300,user)).fetchone()
+                if success:
+                    eid,stamp,ev_kind,subject,raw=success
+                    extra.append(dict(event_id=eid,event_time=stamp,kind=ev_kind,subject=subject,details=json.loads(raw)))
+                    prior=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='ssh_failure' AND subject=? AND event_time BETWEEN ? AND ? ORDER BY event_time DESC LIMIT 256",(ip,stamp-300,stamp)).fetchall()
+                    matched=0
+                    for eid,when,ev_kind,subject,raw in prior:
+                        details=json.loads(raw)
+                        if details.get('user')==user:
+                            extra.append(dict(event_id=eid,event_time=when,kind=ev_kind,subject=subject,details=details));matched+=1
+                            if matched>=32:break
+            self.create_or_append('ssh_threshold',ip,event,extra)
     def ssh_success(self,ip,user,timestamp,event_id,pid=None):
         ip=safe_ip(ip,self.c)
         if not ip or type(timestamp) not in (int,float) or not math.isfinite(timestamp) or not -5<=time.time()-timestamp<=600:return
