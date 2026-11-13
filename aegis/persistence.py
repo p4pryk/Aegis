@@ -55,6 +55,7 @@ def watched_path(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
     if path in ('/etc/passwd','/etc/shadow','/etc/group','/etc/gshadow','/etc/sudoers') or str(p.parent)=='/etc/sudoers.d':return 'identity_permissions'
+    if path in ('/etc/ssh/sshd_config','/etc/security/access.conf') or any(p==root or root in p.parents for root in (pathlib.PurePosixPath('/etc/ssh/sshd_config.d'),pathlib.PurePosixPath('/etc/pam.d'))):return 'authentication_configuration'
     return scope(path)
 
 
@@ -97,7 +98,7 @@ def audit(engine,kind,stamp,serial,content):
             if not mechanism or (path,operation) in seen:continue
             seen.add((path,operation))
             details=dict(group['details'],path=path,operation=operation,mechanism=mechanism,audited_inode=metadata)
-            event_kind='security_file_change' if mechanism=='identity_permissions' else 'persistence_change'
+            event_kind='security_file_change' if mechanism in ('identity_permissions','authentication_configuration') else 'persistence_change'
             event=engine.normalize(event_kind,path,details,key+':file:'+hashlib.sha256((path+':'+operation).encode()).hexdigest()[:12],float(stamp))
             if engine.remember(event):
                 engine.store.observe('auditd',event_kind,path,'Security-related file changed; correlating actor/session metadata, not file contents.',event['event_id'],event['event_time'])

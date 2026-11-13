@@ -102,6 +102,9 @@ cat > /etc/audit/rules.d/aegis-observe.rules <<EOF
 -w /home -p wa -k aegis_persistence
 -w /root/.ssh -p wa -k aegis_persistence
 EOF
+for path in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/pam.d /etc/security/access.conf; do
+  [ ! -e "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_identity" >> /etc/audit/rules.d/aegis-observe.rules
+done
 if $demo; then
   printf '%s\n' "-a always,exit -F arch=b64 -S execve,execveat -F euid=$(id -u aegis-target) -k aegis_app_exec" >> /etc/audit/rules.d/aegis-observe.rules
 fi
