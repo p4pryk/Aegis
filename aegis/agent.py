@@ -45,6 +45,18 @@ def ssh_spray_signal(events,ip):
     accounts={user for stamp,user in failures if 0<=latest-stamp<=120}
     return [dict(kind='possible_ssh_password_spray',distinct_accounts=len(accounts),window_seconds=120)] if len(accounts)>=5 else []
 
+def ssh_success_after_failures(events,ip):
+    valid=lambda user:isinstance(user,str) and bool(re.fullmatch(r'[A-Za-z0-9_.@-]{1,64}',user))
+    successes=[e for e in events if e.get('kind')=='ssh_success' and e.get('details',{}).get('ip')==ip and valid(e.get('details',{}).get('user')) and type(e.get('event_time')) in (int,float) and math.isfinite(e['event_time'])]
+    for success in sorted(successes,key=lambda e:e['event_time'],reverse=True):
+        user=success['details']['user'];stamp=success['event_time'];failures=set()
+        for event in events:
+            details=event.get('details',{});when=event.get('event_time');identifier=event.get('event_id')
+            if event.get('kind')=='ssh_failure' and details.get('ip')==ip and details.get('user')==user and isinstance(identifier,str) and type(when) in (int,float) and math.isfinite(when) and 0<=stamp-when<=300:
+                failures.add(identifier)
+        if len(failures)>=5:return [dict(kind='ssh_success_after_failures',failure_count=len(failures),window_seconds=300)]
+    return []
+
 def trusted_file(path):
     s = os.lstat(path)
     return stat.S_ISREG(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022
@@ -321,9 +333,17 @@ class CorrelatedEngine:
             self.create_or_append('ssh_threshold',ip,event,list(accounts.values()))
     def ssh_success(self,ip,user,timestamp,event_id,pid=None):
         ip=safe_ip(ip,self.c)
-        if not ip:return
+        if not ip or type(timestamp) not in (int,float) or not math.isfinite(timestamp) or not -5<=time.time()-timestamp<=600:return
         event=self.normalize('ssh_success',ip,{'ip':ip,'user':user,'sshd_pid':pid},'sshsuccess:'+event_id,timestamp)
-        if self.remember(event):self.create_or_append('ssh_threshold',ip,event)
+        if self.remember(event):
+            rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='ssh_failure' AND subject=? AND event_time BETWEEN ? AND ? ORDER BY event_time DESC LIMIT 256",(ip,timestamp-300,timestamp)).fetchall()
+            recent=[]
+            for eid,stamp,kind,subject,raw in rows:
+                details=json.loads(raw)
+                if isinstance(user,str) and details.get('user')==user:
+                    recent.append(dict(event_id=eid,event_time=stamp,kind=kind,subject=subject,details=details))
+                if len(recent)>=32:break
+            self.create_or_append('ssh_threshold',ip,event,recent)
     def session_record(self,kind,fields,content,event_id,timestamp):
         payload=content.split('msg=',1)[-1]
         if fields.get('uid')!='0' or not re.search(r'\bexe="/usr/sbin/(?:sshd|sshd-session)"',payload) or not re.search(r'\bres=success\b',payload):return
@@ -583,7 +603,7 @@ class CorrelatedEngine:
                     if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
     def snapshot(self,identifier,kind,subject,version):
         events=self.events(identifier);allowed=[];required=[];edges=[]
-        signals=ssh_spray_signal(events,subject) if kind=='ssh_threshold' else []
+        signals=(ssh_spray_signal(events,subject)+ssh_success_after_failures(events,subject)) if kind=='ssh_threshold' else []
         if kind=='app_sql_persistence':
             from persistence import plan
             allowed,required,edges=plan(events,self.c,self.boot_id)

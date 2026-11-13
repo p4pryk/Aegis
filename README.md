@@ -423,6 +423,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-13 — Highlight SSH success after failed attempts
+
+- Surface a review signal in the terminal and model context when the same account logs in from the same IP after at least five recorded failures in the preceding 300 seconds. Correlation uses at most 256 recent source events and retains at most 32 matching failures; shared addresses and legitimate retries make this context, not proof of compromise. The signal does not authorize blocking or another response.
+- Validation: four focused unit tests and four live checks passed on the Azure Linux VM, including five real failed SSH logins followed by a successful session from an isolated network namespace; the session remained connected and its IP was not blocked. The local suite ran 288 tests successfully, with six Linux/root-only tests skipped.
+
 ### 2026-11-13 — Enrich SSH sessions with security signals
 
 - Include authorization denials, security-sensor failures and kernel security reports in bounded SSH session context when boot ID, audit session and login UID match. Session attribution does not establish causation or authorize a response; generic warnings remain outside this enrichment.
