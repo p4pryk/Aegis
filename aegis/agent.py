@@ -243,6 +243,8 @@ class CorrelatedEngine:
         CREATE INDEX IF NOT EXISTS case_history_lookup ON case_status_history(case_id,time);
         CREATE TABLE IF NOT EXISTS pending_account_resolution(event_id TEXT PRIMARY KEY,event_time REAL,details_json TEXT,deadline REAL);
         CREATE TABLE IF NOT EXISTS ssh_sessions(identity TEXT PRIMARY KEY,event_id TEXT,event_time REAL,details_json TEXT,active INTEGER);''');self.db.commit()
+        from telemetry import ensure_session_index
+        ensure_session_index(self.db)
         import response
         response.initialize(self.db)
         self.last_cleanup=0;self.last_session_reconcile=0

@@ -132,3 +132,28 @@ class Telemetry(unittest.TestCase):
             event=self.e.normalize('system_sensor_failure','auditd',{'boot_id':boot,'audit_session':session,'auid':'1002'},'sensor:'+str(n),self.now)
             self.e.remember(event)
         self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['sensor:0'])
+
+    def test_busy_other_sessions_cannot_displace_matching_context(self):
+        login=self.e.normalize('ssh_session_open','session',{'boot_id':self.e.boot_id,'session':'42','auid':'1002'},'login',self.now-100)
+        matching=self.e.normalize('sudo_command','actor',{'boot_id':self.e.boot_id,'audit_session':'42','auid':'1002'},'matching',self.now-50)
+        self.e.remember(matching)
+        rows=[]
+        for n in range(2300):
+            details={'boot_id':self.e.boot_id,'audit_session':'99','auid':'1002'}
+            rows.append(('noise:'+str(n),self.now-1,'sudo_command','other',json.dumps(details)))
+        self.e.db.executemany('INSERT INTO correlation_events VALUES (?,?,?,?,?)',rows);self.e.db.commit()
+        self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['matching'])
+        self.assertTrue(any(row[1]=='correlation_audit_identity_time' for row in self.e.db.execute('PRAGMA index_list(correlation_events)')))
+
+    def test_boolean_null_and_other_boot_identities_do_not_crowd_valid_session(self):
+        login=self.e.normalize('ssh_session_open','session',{'boot_id':self.e.boot_id,'session':'1','auid':'1002'},'login',self.now-20)
+        valid=self.e.normalize('sudo_command','actor',{'boot_id':self.e.boot_id,'session':'1','auid':'1002'},'matching',self.now-10);self.e.remember(valid)
+        rows=[]
+        for n in range(300):
+            details={'boot_id':self.e.boot_id,'audit_session':True,'session':'1','auid':'1002'}
+            rows.append(('bad:'+str(n),self.now-1,'sudo_command','other',json.dumps(details)))
+        self.e.db.executemany('INSERT INTO correlation_events VALUES (?,?,?,?,?)',rows);self.e.db.commit()
+        self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['matching'])
+        self.e.db.execute('DROP INDEX correlation_audit_identity_time');self.e.db.commit()
+        self.e=agent.CorrelatedEngine(self.c,self.store,None)
+        self.assertEqual([e['event_id'] for e in telemetry.session_events(self.e,login,self.now+1)],['matching'])

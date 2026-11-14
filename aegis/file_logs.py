@@ -4,7 +4,7 @@ from system_sources import family, parse, text_record
 
 class Files:
     def __init__(self,engine,paths):
-        self.engine=engine;self.paths=paths;self.handles={};self.health={};self.last_poll=0
+        self.engine=engine;self.paths=paths;self.handles={};self.health={};self.restored=set();self.last_poll=0
     def close(self):
         for stream in self.handles.values():stream.close()
         self.handles={}
@@ -32,6 +32,11 @@ class Files:
             key=self.cursor_key(category,path)
             try:
                 cursor=self.engine.store.state(key) or {};gap=cursor.get('gap',False)
+                if category not in self.restored:
+                    for name in ('invalid','unrecognized'):
+                        value=cursor.get(name,0)
+                        if type(value) is int and value>=0:h[name]=value
+                    self.restored.add(category)
                 stream=self.handles.get(path)
                 if stream is None:
                     stream=self.open(path);self.handles[path]=stream
@@ -41,14 +46,18 @@ class Files:
                 position=cursor.get('offset',0)
                 if cursor.get('identity')!=identity:
                     gap=bool(cursor) or info.st_size>1048576
-                    position=max(0,info.st_size-1048576)
-                    if position:stream.seek(position);stream.readline(8193);position=stream.tell()
-                    cursor={'identity':identity,'offset':position,'generation':cursor.get('generation',0)+1,'gap':gap}
+                    position=max(0,info.st_size-1048576);discard=False
+                    if position:
+                        stream.seek(position-1);boundary=stream.read(1)==b'\n';stream.seek(position)
+                        if not boundary:
+                            prefix=stream.readline(8193);position=stream.tell();discard=not prefix.endswith(b'\n')
+                    cursor={'identity':identity,'offset':position,'generation':cursor.get('generation',0)+1,'gap':gap,'discard':discard}
                 stream.seek(position)
                 anchor=cursor.get('anchor')
                 if info.st_size<position or (anchor and self.anchor(stream,position)!=anchor):
                     position=0;gap=True;cursor.update(generation=cursor.get('generation',0)+1,discard=False)
                 stream.seek(position)
+                staged=dict(h);invalid_before=staged['invalid']
                 with self.engine.store.atomic():
                     for _ in range(25):
                         start=stream.tell();raw=stream.readline(8193)
@@ -56,14 +65,16 @@ class Files:
                         if cursor.get('discard'):
                             cursor['discard']=not raw.endswith(b'\n');position=stream.tell();continue
                         if len(raw)>8192:
-                            h['invalid']+=1;gap=True;cursor['discard']=not raw.endswith(b'\n');position=stream.tell();continue
+                            staged['invalid']+=1;gap=True;cursor['discard']=not raw.endswith(b'\n');position=stream.tell();continue
                         if not raw.endswith(b'\n'):
                             stream.seek(start);break  # Finish the line after the producer appends its newline.
-                        position=stream.tell();h['read']+=1;count+=1;h['last_record_at']=now
+                        position=stream.tell();staged['read']+=1;count+=1;staged['last_record_at']=now
                         identifier='file:'+hashlib.sha256((path+':'+str(identity)+':'+str(cursor['generation'])+':'+str(start)).encode()).hexdigest()
-                        self.accept(category,raw,identifier,now,available,h)
-                    cursor.update(identity=identity,offset=position,anchor=self.anchor(stream,position),gap=gap)
+                        self.accept(category,raw,identifier,now,available,staged)
+                    gap=gap or staged['invalid']>invalid_before
+                    cursor.update(identity=identity,offset=position,anchor=self.anchor(stream,position),gap=gap,invalid=staged['invalid'],unrecognized=staged['unrecognized'])
                     self.engine.store.state(key,cursor)
+                h.update(staged)
                 # Drain the old inode before switching on rename rotation. Never open compressed archives.
                 current=os.stat(path,follow_symlinks=False)
                 if [current.st_dev,current.st_ino]!=identity and position>=os.fstat(stream.fileno()).st_size:
@@ -72,7 +83,7 @@ class Files:
                 h.update(pending=pending,unit='bytes',checked_at=now,lag_seconds=max(0,now-h.get('pending_since',now)) if pending else 0)
                 if pending:h.setdefault('pending_since',now)
                 else:h.pop('pending_since',None)
-                h.update(status='GAP' if gap else 'LAGGING' if pending and h['lag_seconds']>=5 else 'LIVE' if now-h.get('last_record_at',0)<30 else 'QUIET',reason='Rotation/truncation or bounded startup replay: continuity is not guaranteed' if gap else 'File is readable; producer liveness is not independently verified')
+                h.update(status='GAP' if gap else 'LAGGING' if pending and h['lag_seconds']>=5 else 'LIVE' if now-h.get('last_record_at',0)<30 else 'QUIET',reason='Invalid input, rotation/truncation or bounded startup replay: continuity is not guaranteed' if gap else 'File is readable; producer liveness is not independently verified')
             except (OSError,ValueError) as exc:
                 h.update(status='MISSING' if isinstance(exc,FileNotFoundError) else 'DOWN',reason=type(exc).__name__+': source unavailable or unsafe',checked_at=now,pending=0,unit='bytes',lag_seconds=0)
         return count
@@ -80,7 +91,7 @@ class Files:
         return 'file_cursor_'+hashlib.sha256(path.encode()).hexdigest()[:16]
     def accept(self,category,raw,identifier,now,available,h):
         try:record=text_record(raw.decode('utf-8').rstrip('\n'),now)
-        except UnicodeError:record=None
+        except UnicodeError:h['invalid']+=1;return
         if not record:h['unrecognized']+=1;return
         program,stamp,message,inferred=record;target=family(program)
         if category=='system' and target!='system' and target in available:

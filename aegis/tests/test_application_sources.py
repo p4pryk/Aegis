@@ -106,6 +106,28 @@ class Applications(unittest.TestCase):
     def test_invalid_and_stale_counted_without_raw_payloads(self):
         self.path.write_text('not JSON\n'+json.dumps({'time':0,'event':'security_alert'})+'\n'+json.dumps({'time':time.time(),'event':'unknown'})+'\n')
         self.files.poll(True);h=self.files.health['backend'];self.assertEqual((h['invalid'],h['stale'],h['unrecognized']),(1,1,1));self.assertFalse(self.cases())
+    def test_invalid_and_unrecognized_counts_survive_restart_with_gap(self):
+        self.path.write_text('not JSON\n'+json.dumps({'time':time.time(),'event':'unknown'})+'\n')
+        self.files.poll(True);self.assertEqual(self.files.health['backend']['status'],'GAP')
+        self.files.close();self.files=apps.Applications(self.engine);self.addCleanup(self.files.close);self.files.poll(True)
+        h=self.files.health['backend'];self.assertEqual((h['invalid'],h['unrecognized'],h['status']),(1,1,'GAP'))
+        self.append();self.files.poll(True)
+        self.assertEqual(h['status'],'GAP');self.assertEqual(h['parsed'],1)
+    def test_bounded_start_never_interprets_suffix_of_oversized_line(self):
+        forged=json.dumps({'time':time.time(),'event':'security_alert','user':'forged'}).encode()
+        real=json.dumps({'time':time.time(),'event':'security_alert','user':'real'}).encode()
+        body=b'X'*(100+8193)+forged+b'\n'+real+b'\n'
+        self.path.write_bytes(body+b'\n'*(1048676-len(body)))
+        self.files.poll(True)
+        events=self.store.db.execute('SELECT details_json FROM correlation_events').fetchall()
+        self.assertEqual([json.loads(row[0])['user'] for row in events],['real'])
+        self.assertEqual(self.files.health['backend']['status'],'GAP')
+    def test_bounded_start_keeps_a_line_at_exact_boundary(self):
+        real=json.dumps({'time':time.time(),'event':'security_alert','user':'real'}).encode()
+        body=b'X'*99+b'\n'+real+b'\n'
+        self.path.write_bytes(body+b'\n'*(1048676-len(body)))
+        self.files.poll(True)
+        self.assertEqual(json.loads(self.store.db.execute('SELECT details_json FROM correlation_events').fetchone()[0])['user'],'real')
     def test_coverage_is_visible_with_no_demo_dependency(self):
         self.append();self.files.poll(True)
         health={'time':time.time(),'sources':self.files.sources(),'application_coverage':[self.source]}

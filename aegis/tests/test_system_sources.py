@@ -156,6 +156,12 @@ class FileSources(unittest.TestCase):
         self.assertGreater(self.files.health['auth']['invalid'],0);self.assertGreater(self.files.health['auth']['unrecognized'],0)
         self.files.close();self.path.unlink();self.path.symlink_to('/etc/passwd');self.files.poll(True)
         self.assertEqual(self.files.health['auth']['status'],'DOWN')
+    def test_invalid_utf8_is_a_durable_gap(self):
+        self.path.write_bytes(b'\xff\n');self.files.poll(True)
+        self.assertEqual((self.files.health['auth']['invalid'],self.files.health['auth']['status']),(1,'GAP'))
+        self.files.close();self.files=file_logs.Files(self.e,{'auth':str(self.path)});self.addCleanup(self.files.close)
+        self.files.poll(True)
+        self.assertEqual((self.files.health['auth']['invalid'],self.files.health['auth']['status']),(1,'GAP'))
     def test_syslog_auth_copy_is_skipped_but_repeated_auth_records_are_kept(self):
         other=self.root/'syslog';self.write('authentication failure user=alice');other.write_text(self.path.read_text());other.chmod(0o640)
         self.files.close();self.files=file_logs.Files(self.e,{'auth':str(self.path),'system':str(other)});self.addCleanup(self.files.close)

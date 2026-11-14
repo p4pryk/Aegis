@@ -6,6 +6,13 @@ import time
 CHANGES=('identity_change','security_file_change','persistence_change')
 CONTEXT=(*CHANGES,'sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','service_event','process_exec','system_session','system_identity','system_auth_failure','system_auth_success','system_authorization_denied','system_privilege','system_service','system_schedule','system_access_denied','system_resource_failure','system_process_fault','system_sensor_failure','system_kernel_security')
 RECORDS={'USER_CHAUTHTOK','1108','GRP_CHAUTHTOK','1133','CHUSER_ID','1125','ACCT_LOCK','1135','ACCT_UNLOCK','1136','USER_MGMT','1102','GRP_MGMT','1132','ADD_GROUP','1116','DEL_GROUP','1117','CHGRP_ID','1119','DEL_USER','1115'}
+SESSION_SQL="CASE WHEN json_type(details_json,'$.audit_session') IS NULL THEN json_extract(details_json,'$.session') ELSE json_extract(details_json,'$.audit_session') END"
+SESSION_TYPE_SQL="CASE WHEN json_type(details_json,'$.audit_session') IS NULL THEN json_type(details_json,'$.session') ELSE json_type(details_json,'$.audit_session') END"
+
+
+def ensure_session_index(db):
+    db.execute("CREATE INDEX IF NOT EXISTS correlation_audit_identity_time ON correlation_events (json_extract(details_json,'$.boot_id'), CAST(("+SESSION_SQL+") AS TEXT), CAST(json_extract(details_json,'$.auid') AS TEXT), event_time)")
+    db.commit()
 
 
 def identity(details):
@@ -36,8 +43,8 @@ def management(engine,kind,content,event_id,stamp,fields):
 def session_events(engine,login,until):
     ident=identity(login['details'])
     if ident is None:return []
-    rows=engine.db.execute('SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('+','.join('?' for _ in CONTEXT)+') AND event_time BETWEEN ? AND ? ORDER BY event_time DESC LIMIT 2048',
-                           (*CONTEXT,max(login['event_time'],until-600),until)).fetchall()
+    rows=engine.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events INDEXED BY correlation_audit_identity_time WHERE json_extract(details_json,'$.boot_id')=? AND CAST(("+SESSION_SQL+") AS TEXT)=? AND CAST(json_extract(details_json,'$.auid') AS TEXT)=? AND ("+SESSION_TYPE_SQL+") IN ('text','integer') AND json_type(details_json,'$.auid') IN ('text','integer') AND event_time BETWEEN ? AND ? AND kind IN ("+','.join('?' for _ in CONTEXT)+") ORDER BY event_time DESC LIMIT 256",
+                           (*ident,max(login['event_time'],until-600),until,*CONTEXT)).fetchall()
     result=[]
     for eid,stamp,kind,subject,raw in rows:
         details=json.loads(raw)
