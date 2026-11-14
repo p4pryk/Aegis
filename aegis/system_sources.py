@@ -126,12 +126,46 @@ def text_record(line,now=None):
     except (ValueError,OverflowError):return None
     return program,stamp,msg,inferred
 
+def file_auth(engine,event):
+    """Group only producer-reported SSH records for the same account and IP."""
+    import bisect,json
+    details=event['details'];user=details.get('user');ip=details.get('ip')
+    if event['kind'] not in ('system_auth_failure','system_auth_success') or details.get('transport')!='file' or not isinstance(user,str) or not isinstance(ip,str):return False
+    subject='system-auth:'+ip+'/'+user;stamp=event['event_time']
+    rows=engine.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('system_auth_failure','system_auth_success') AND subject=? AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.ip')=? AND json_extract(details_json,'$.transport')='file' ORDER BY event_time DESC LIMIT 256",(user,stamp-300,stamp+300,ip)).fetchall()
+    failures=sorted(when for _,when,kind,_,_ in rows if kind=='system_auth_failure')
+    successes=[when for _,when,kind,_,_ in rows if kind=='system_auth_success']
+    threshold=engine.c.get('ssh_threshold',5)
+    burst=bool(failures) and len(failures)-bisect.bisect_left(failures,failures[-1]-120)>=threshold
+    matching=next((success for success in successes if bisect.bisect_right(failures,success)-bisect.bisect_left(failures,success-300)>=threshold),None)
+    selected=[];seen=set()
+    if matching is not None:
+        anchors=[r for r in rows if r[2]=='system_auth_success' and r[1]==matching][:1]
+        anchors.extend([r for r in rows if r[2]=='system_auth_failure' and 0<=matching-r[1]<=300][:31])
+        for row in anchors:
+            if row[0] not in seen:selected.append(row);seen.add(row[0])
+    for row in rows:
+        if len(selected)>=32:break
+        if row[0] not in seen:selected.append(row);seen.add(row[0])
+    context=[engine.normalize(kind,target,json.loads(raw),eid,when) for eid,when,kind,target,raw in selected]
+    current=engine.db.execute("SELECT id FROM cases WHERE kind='system_activity' AND subject=? AND created_at>? ORDER BY created_at DESC LIMIT 1",(subject,time.time()-120)).fetchone()
+    if burst or matching is not None or current:engine.create_or_append('system_activity',subject,event,context,case_id=current[0] if current else None)
+    return True
+
+def file_auth_signal(events):
+    failures=[e for e in events if e['kind']=='system_auth_failure' and e['details'].get('transport')=='file']
+    for success in (e for e in events if e['kind']=='system_auth_success' and e['details'].get('transport')=='file'):
+        d=success['details'];ids={e['event_id'] for e in failures if e['details'].get('user')==d.get('user') and e['details'].get('ip')==d.get('ip') and 0<=success['event_time']-e['event_time']<=300}
+        if d.get('user') and d.get('ip') and len(ids)>=5:return [dict(kind='reported_ssh_success_after_failures',failure_count=len(ids),window_seconds=300)]
+    return []
+
 def ingest(engine,event):
     if not event or not -5<=time.time()-event['event_time']<=600:return False
     # File records have no provable boot identity. Never attach a current-boot PID or AUID.
     if event['details'].get('boot_id') not in (None,engine.boot_id):return False
     if not engine.remember(event):return False
     engine.store.observe(event['details']['source'],event['kind'],event['subject'],event['description'],event['event_id'],event['event_time'])
+    if file_auth(engine,event):return True
     from telemetry import identity
     ident=identity(event['details'])
     subject=':'.join(ident) if ident else 'system-log:'+event['details']['category']

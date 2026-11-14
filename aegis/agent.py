@@ -284,8 +284,12 @@ class CorrelatedEngine:
                     self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,parent))
                     self.status(parent,'awaiting_analysis')
                 previous=self.events(parent)
-                from application_sources import carry_context
-                extra=carry_context(previous)
+                if kind=='system_activity' and subject.startswith('system-auth:'):
+                    chosen={e['event_id']:e for e in [*extra,*previous[-8:]] if e['event_id']!=event['event_id']}
+                    extra=list(chosen.values())[:32]
+                else:
+                    from application_sources import carry_context
+                    extra=carry_context(previous)
                 row=None
         identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+identity_event['event_id']).encode()).hexdigest()[:24]
         if not row:
@@ -452,17 +456,17 @@ class CorrelatedEngine:
         if normalize_boot_id(event.get('_BOOT_ID'))!=self.boot_id:return
         if event.get('_COMM') not in ('sshd','sshd-session') or str(event.get('_UID'))!='0':return
         message=event.get('MESSAGE','')
-        m=re.search(r'^Failed (?:password|publickey) for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+) port \d+',message)
+        m=re.search(r'^Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+) port \d+',message)
         if not m:m=re.search(r'^Invalid user \S+ from ([0-9a-fA-F:.]+) port \d+',message)
         event_id=event.get('__CURSOR',str(event['__REALTIME_TIMESTAMP']))
         timestamp=int(event['__REALTIME_TIMESTAMP'])/1e6
         if not -5<=time.time()-timestamp<=600:return
-        accepted=re.search(r'^Accepted (?:publickey|password) for (\S+) from ([0-9a-fA-F:.]+) port \d+',message)
+        accepted=re.search(r'^Accepted (?:publickey|password|keyboard-interactive/pam) for (\S+) from ([0-9a-fA-F:.]+) port \d+',message)
         if m:self.store.observe('sshd','ssh_auth_failure',m[1],'Authentication failed / unknown account.',event_id,timestamp)
         elif accepted:self.store.observe('sshd','ssh_login_success',accepted[2],'Successful sign-in for account '+accepted[1][:50]+'.',event_id,timestamp)
         else:self.store.observe('sshd','ssh_activity','sshd','SSH connection or session event.',event_id,timestamp)
         if m:
-            user_match=re.search(r'^(?:Failed (?:password|publickey) for (?:invalid user )?|Invalid user )(\S+)',message)
+            user_match=re.search(r'^(?:Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?|Invalid user )(\S+)',message)
             self.failure('ssh',m[1],timestamp,event_id,user=user_match[1] if user_match else None)
         elif accepted:self.ssh_success(accepted[2],accepted[1],timestamp,event_id,event.get('_PID'))
     def journal_context(self,raw):
@@ -621,6 +625,9 @@ class CorrelatedEngine:
     def snapshot(self,identifier,kind,subject,version):
         events=self.events(identifier);allowed=[];required=[];edges=[]
         signals=(ssh_spray_signal(events,subject)+ssh_success_after_failures(events,subject)) if kind=='ssh_threshold' else []
+        if kind=='system_activity' and subject.startswith('system-auth:'):
+            from system_sources import file_auth_signal
+            signals=file_auth_signal(events)
         if kind=='app_sql_persistence':
             from persistence import plan
             allowed,required,edges=plan(events,self.c,self.boot_id)
@@ -835,7 +842,7 @@ def audit_plugin(c):
 
 def serve_core(c):
     import queue
-    from journal_stream import Checkpoints,reader
+    from journal_stream import Checkpoints,reader,persist_loss,bootstrap_loss,restore_health
     from audit_spool import Spool,consume
     from monitoring import Meter
     if c.get('mode','correlated')!='correlated':raise ValueError('Only correlated analyze-before-defense mode is permitted')
@@ -853,8 +860,9 @@ def serve_core(c):
     events=queue.Queue(maxsize=4096)
     checkpoints=Checkpoints(store)
     previous=store.state('sensor_health') or {}
-    for key,target in (('journal',JOURNAL_HEALTH),('journal_context',JOURNAL_CONTEXT_HEALTH)):
-        target.update({k:v for k,v in previous.get(key,{}).items() if k in ('last_received_at','cursor_gap_at','invalid_records')})
+    for key,source,target in (('journal','ssh',JOURNAL_HEALTH),('journal_context','journal_context',JOURNAL_CONTEXT_HEALTH)):
+        bootstrap_loss(store,source,previous.get(key,{}))
+        target.update(restore_health(store,source,previous.get(key,{})))
     threading.Thread(target=reader,args=(events,'ssh',reader_config,checkpoints,JOURNAL_HEALTH),daemon=True).start()
     threading.Thread(target=reader,args=(events,'journal_context',reader_config,checkpoints,JOURNAL_CONTEXT_HEALTH),daemon=True).start()
     last_health=0;last_audit_health=0;audit_health={}
@@ -868,6 +876,7 @@ def serve_core(c):
                     try:kind,event=events.get_nowait()
                     except queue.Empty:break
                     if kind=='health':store.state('journal_health',{'time':time.time(),'error':event});continue
+                    if kind=='journal_loss':persist_loss(store,event['source'],event['reason'],event['time']);continue
                     try:
                         if kind=='journal_context':
                             program=event.get('SYSLOG_IDENTIFIER') or event.get('_COMM','')
@@ -876,6 +885,10 @@ def serve_core(c):
                         elif kind=='ssh':engine.journal_ssh(event)
                     except (ValueError,TypeError,KeyError) as exc:
                         store.state('journal_parse_error',{'time':time.time(),'source':kind,'error':type(exc).__name__})
+                        if kind in ('ssh','journal_context'):
+                            persist_loss(store,kind,'invalid_record',time.time())
+                            target=JOURNAL_HEALTH if kind=='ssh' else JOURNAL_CONTEXT_HEALTH
+                            target['invalid_records']=target.get('invalid_records',0)+1
                     processed[kind]=event
                     consumed+=1
                 if context_batch:

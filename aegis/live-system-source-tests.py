@@ -55,6 +55,24 @@ try:
             check('One source consumes at most 25 complete records per batch',store.db.execute('SELECT count(*) FROM observations').fetchone()[0]-before==25)
             check('Backlog is visible',files.health['auth']['pending']>0)
         finally:files.close();store.db.close()
+    with tempfile.TemporaryDirectory(prefix='aegis-auth-context-') as directory:
+        path=pathlib.Path(directory)/'auth.log';path.write_text('');path.chmod(0o640)
+        store=agent.Store(dict(agent.DEFAULTS,data_dir=directory));engine=agent.CorrelatedEngine(dict(agent.DEFAULTS,data_dir=directory),store,None)
+        files=file_logs.Files(engine,{'auth':str(path)})
+        try:
+            now=datetime.datetime.now().astimezone();earlier=(now-datetime.timedelta(seconds=10)).isoformat()
+            with path.open('a') as out:
+                out.write(now.isoformat()+' host sshd[11]: Accepted publickey for alice from 192.0.2.51 port 22\n')
+                for _ in range(5):
+                    out.write(earlier+' host sshd[11]: Failed publickey for alice from 192.0.2.51 port 22\n')
+                    out.write(earlier+' host sshd[12]: Failed publickey for bob from 192.0.2.52 port 22\n')
+            files.poll(True)
+            cases=store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity'").fetchall()
+            alice=next(row for row in cases if row[2].endswith('/alice'));bob=next(row for row in cases if row[2].endswith('/bob'))
+            evidence=engine.snapshot(*alice)
+            check('Reordered file authentication reports retain exact account/IP context',len(cases)==2 and {e['details'].get('user') for e in evidence['events']}=={'alice'} and {e['details'].get('user') for e in engine.events(bob[0])}=={'bob'})
+            check('File-reported success after failures is visible without response',any(s['kind']=='reported_ssh_success_after_failures' for s in evidence['signals']) and not evidence['allowed_actions'] and all(e['details']['boot_id'] is None for e in evidence['events']))
+        finally:files.close();store.db.close()
     config_path=pathlib.Path('/etc/defense-agent/config.json');original=config_path.read_bytes()
     live_path=pathlib.Path('/var/log/aegis-file-source-check.log');actor='sourcecheck_'+str(int(started))
     try:

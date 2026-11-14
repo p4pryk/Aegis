@@ -5,6 +5,28 @@ import subprocess
 import threading
 import time
 
+def persist_loss(store, source, reason, stamp):
+    if source not in ('ssh','journal_context') or reason not in ('invalid_record','cursor_gap'):raise ValueError('Invalid journal loss marker')
+    value=store.state('journal_loss_'+source) or {}
+    if reason=='invalid_record':value['invalid_records']=value.get('invalid_records',0)+1
+    else:value['cursor_gap_at']=stamp
+    store.state('journal_loss_'+source,value)
+
+
+def bootstrap_loss(store, source, previous):
+    if store.state('journal_loss_'+source) is not None:return
+    value={key:previous[key] for key in ('cursor_gap_at','invalid_records') if isinstance(previous.get(key),(int,float)) and previous[key]>0}
+    if value:store.state('journal_loss_'+source,value)
+
+
+def restore_health(store, source, previous):
+    saved=store.state('journal_loss_'+source) or {}
+    result={key:previous[key] for key in ('last_received_at','cursor_gap_at','invalid_records') if isinstance(previous.get(key),(int,float)) and previous[key]>=0}
+    for key in ('cursor_gap_at','invalid_records'):
+        value=saved.get(key)
+        if isinstance(value,(int,float)) and value>result.get(key,0):result[key]=value
+    return result
+
 
 class Checkpoints:
     def __init__(self, store):
@@ -80,6 +102,7 @@ def reader(events, source, config, checkpoints, health):
                             raise ValueError('Journal record must be an object')
                     except (TypeError, ValueError):
                         health['invalid_records'] = health.get('invalid_records', 0) + 1
+                        enqueue(events,'journal_loss',{'source':source,'reason':'invalid_record','time':time.time()},health)
                         continue
                     enqueue(events, source, record, health)
                     received = True
@@ -88,6 +111,7 @@ def reader(events, source, config, checkpoints, health):
             if code and cursor and not received:
                 # Vacuuming may remove the checkpoint. Explicitly report a possible gap.
                 health['cursor_gap_at'] = time.time()
+                enqueue(events,'journal_loss',{'source':source,'reason':'cursor_gap','time':health['cursor_gap_at']},health)
                 fallback = True
             elif received:
                 fallback = False

@@ -62,6 +62,18 @@ class JournalRecovery(unittest.TestCase):
         self.engine.journal_ssh(self.record)
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM correlation_events').fetchone()[0], 1)
 
+    def test_keyboard_interactive_failures_and_success_are_review_only(self):
+        for n in range(5):
+            self.engine.journal_ssh(dict(self.record,__CURSOR='kbd-'+str(n),MESSAGE='Failed keyboard-interactive/pam for lab_actor from 198.51.100.9 port 2222'))
+        self.engine.journal_ssh(dict(self.record,__CURSOR='kbd-success',MESSAGE='Accepted keyboard-interactive/pam for lab_actor from 198.51.100.9 port 2222'))
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='ssh_threshold'").fetchone()
+        evidence=self.engine.snapshot(*row)
+        self.assertEqual(sum(e['kind']=='ssh_failure' for e in evidence['events']),5)
+        self.assertTrue(any(s['kind']=='ssh_success_after_failures' for s in evidence['signals']))
+        self.assertEqual(evidence['allowed_actions'],[])
+        self.engine.journal_ssh(dict(self.record,_UID='1000',__CURSOR='untrusted',MESSAGE='Accepted keyboard-interactive/pam for lab_actor from 198.51.100.9 port 2222'))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM correlation_events WHERE kind='ssh_success'").fetchone()[0],1)
+
     def test_old_journal_backlog_is_not_treated_as_a_new_incident(self):
         self.record['__REALTIME_TIMESTAMP'] = str(int((time.time()-601)*1e6))
         self.engine.journal_ssh(self.record)
@@ -112,7 +124,48 @@ class JournalRecovery(unittest.TestCase):
         self.assertIn('--after-cursor=removed-cursor', popen.call_args_list[0].args[0])
         self.assertIn('--since=10 minutes ago', popen.call_args_list[1].args[0])
         self.assertIn('cursor_gap_at', health)
+        source,marker=events.get_nowait()
+        self.assertEqual((source,marker['source'],marker['reason']),('journal_loss','ssh','cursor_gap'))
         self.assertEqual(events.get_nowait()[1], self.record)
+
+    def test_invalid_record_marker_precedes_later_checkpoint(self):
+        process=Mock(pid=999998,stdout=iter(['not-json',json.dumps(self.record)]));process.wait.return_value=0
+        process.__enter__=Mock(return_value=process);process.__exit__=Mock(return_value=False)
+        checkpoints=Mock();checkpoints.cursor.return_value=None
+        health={};events=queue.Queue()
+        with patch.object(journal_stream.subprocess,'Popen',return_value=process),patch.object(journal_stream.time,'sleep',side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):journal_stream.reader(events,'ssh',self.config,checkpoints,health)
+        source,marker=events.get_nowait()
+        self.assertEqual((source,marker['reason']),('journal_loss','invalid_record'))
+        self.assertEqual(events.get_nowait()[1],self.record)
+        self.assertEqual(health['invalid_records'],1)
+
+    def test_loss_marker_and_cursor_commit_atomically_and_restore_before_health_snapshot(self):
+        checkpoints=journal_stream.Checkpoints(self.store)
+        with self.assertRaises(RuntimeError):
+            with self.store.atomic():
+                journal_stream.persist_loss(self.store,'ssh','invalid_record',time.time())
+                checkpoints.commit(self.store,{'ssh':self.record})
+                raise RuntimeError('simulated crash before commit')
+        self.assertIsNone(self.store.state('journal_loss_ssh'))
+        self.assertIsNone(self.store.state('journal_cursor_ssh'))
+        with self.store.atomic():
+            journal_stream.persist_loss(self.store,'ssh','invalid_record',time.time())
+            journal_stream.persist_loss(self.store,'ssh','cursor_gap',123)
+            checkpoints.commit(self.store,{'ssh':self.record})
+        self.assertEqual(self.store.state('journal_cursor_ssh')['cursor'],'cursor-1')
+        restored=journal_stream.restore_health(self.store,'ssh',{})
+        self.assertEqual(restored['invalid_records'],1);self.assertEqual(restored['cursor_gap_at'],123)
+        self.assertEqual(journal_stream.restore_health(self.store,'journal_context',{}),{})
+        self.assertEqual(journal_stream.restore_health(self.store,'ssh',{'invalid_records':2})['invalid_records'],2)
+
+    def test_first_durable_marker_preserves_existing_health_history(self):
+        journal_stream.bootstrap_loss(self.store,'ssh',{'invalid_records':7,'cursor_gap_at':123})
+        journal_stream.bootstrap_loss(self.store,'journal_context',{'invalid_records':2})
+        journal_stream.persist_loss(self.store,'ssh','invalid_record',time.time())
+        journal_stream.persist_loss(self.store,'journal_context','invalid_record',time.time())
+        self.assertEqual(self.store.state('journal_loss_ssh'),{'invalid_records':8,'cursor_gap_at':123})
+        self.assertEqual(self.store.state('journal_loss_journal_context')['invalid_records'],3)
 
 
 if __name__ == '__main__':

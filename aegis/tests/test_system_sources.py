@@ -48,6 +48,50 @@ class SystemSources(unittest.TestCase):
         events=self.e.events(row[0]);self.assertEqual(len(events),6)
         self.assertTrue(all(e['details']['boot_id'] is None and 'audit_session' not in e['details'] for e in events))
         self.assertEqual(self.e.snapshot(*row)['allowed_actions'],[])
+    def test_file_ssh_cases_separate_accounts_and_ips_and_show_reported_success(self):
+        for i in range(5):
+            system_sources.ingest(self.e,self.event('sshd','Failed password for alice from 192.0.2.8 port 44',i))
+            system_sources.ingest(self.e,self.event('sshd','Failed password for bob from 192.0.2.9 port 44',i+10))
+        system_sources.ingest(self.e,self.event('sshd','Accepted password for alice from 192.0.2.8 port 44',20))
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity' ORDER BY subject").fetchall()
+        self.assertEqual(len(rows),2)
+        alice=next(row for row in rows if row[2].endswith('/alice'))
+        evidence=self.e.snapshot(*alice)
+        self.assertEqual({e['details'].get('user') for e in evidence['events']},{'alice'})
+        self.assertTrue(any(s['kind']=='reported_ssh_success_after_failures' for s in evidence['signals']))
+        self.assertEqual(evidence['allowed_actions'],[])
+        case={'id':alice[0],'kind':alice[1],'subject':alice[2],'version':alice[3],'status':'insufficient_evidence','evidence_json':json.dumps(evidence)}
+        self.assertIn('File reports SSH login','\n'.join(console.case_lines({'cases':[case]},120)))
+    def test_file_ssh_out_of_order_success_correlates_after_restart(self):
+        now=time.time()
+        success=self.event('sshd','Accepted publickey for alice from 192.0.2.8 port 44',99)
+        success['event_time']=now;system_sources.ingest(self.e,success)
+        self.e=agent.CorrelatedEngine(self.c,self.store,None)
+        for i in range(5):
+            e=self.event('sshd','Failed publickey for alice from 192.0.2.8 port 44',i)
+            e['event_time']=now-10-i;system_sources.ingest(self.e,e)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity'").fetchone()
+        self.assertIsNotNone(row);evidence=self.e.snapshot(*row)
+        self.assertTrue(any(s['kind']=='reported_ssh_success_after_failures' for s in evidence['signals']))
+        self.assertEqual(evidence['allowed_actions'],[])
+    def test_file_ssh_does_not_claim_success_after_later_failures_or_other_ip(self):
+        now=time.time();success=self.event('sshd','Accepted publickey for alice from 192.0.2.8 port 44',99)
+        success['event_time']=now-10;system_sources.ingest(self.e,success)
+        for i in range(5):
+            e=self.event('sshd','Failed publickey for alice from 192.0.2.8 port 44',i);e['event_time']=now;system_sources.ingest(self.e,e)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity'").fetchone()
+        self.assertFalse(self.e.snapshot(*row)['signals'])
+    def test_file_ssh_continuation_preserves_bounded_authentication_chain(self):
+        now=time.time()
+        for n in range(5):
+            e=self.event('sshd','Failed password for alice from 192.0.2.8 port 44',n);e['event_time']=now-20;system_sources.ingest(self.e,e)
+        for n in range(70):
+            e=self.event('sshd','Accepted password for alice from 192.0.2.8 port 44',n+100);e['event_time']=now-10;system_sources.ingest(self.e,e)
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='system_activity' ORDER BY created_at DESC").fetchall()
+        self.assertGreater(len(rows),1)
+        evidence=self.e.snapshot(*rows[0]);self.assertLessEqual(len(evidence['events']),64)
+        self.assertTrue(any(s['kind']=='reported_ssh_success_after_failures' for s in evidence['signals']))
+        self.assertEqual(evidence['allowed_actions'],[])
     def test_old_and_previous_boot_journal_records_are_not_ingested(self):
         e=self.event('kernel','oom-kill: constraint');e['event_time']-=601;self.assertFalse(system_sources.ingest(self.e,e))
         e['event_time']=time.time();e['details']['boot_id']='old';self.assertFalse(system_sources.ingest(self.e,e))
