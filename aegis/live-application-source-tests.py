@@ -68,11 +68,15 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         check('Real successful login is returned',request('/login',password='test-password')==200)
         check('Authenticated in-memory account creation completes',request('/users',sid=session)==201 and 'temporary-user' in created)
         check('SQL-like HTTP input returns 200 without asserting exploitation',request('/search?q=union%20select&token=SECRET')==200)
-        wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=25)
+        check('Double-encoded SQL-like HTTP input reaches the independent app',request('/search-encoded?q=union%252F%252A%252A%252Fselect')==200)
+        check('Benign double hyphens reach the independent app',request('/search--catalog')==200)
+        wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=29)
         rows=read("SELECT kind,details_json FROM correlation_events WHERE subject=?",(app,));details=[json.loads(r[1]) for r in rows]
         check('All three independent sources are consumed',{d['source'] for d in details}==set(paths))
         check('Nested backend mapping records both login outcomes',{d.get('outcome') for d in details if d['event']=='authentication'}=={'success','failure'})
         check('SQL signature is observed without claiming bypass',any(d.get('sqli_signature') for d in details) and all('bypass' not in d for d in details))
+        encoded=__import__('hashlib').sha256(b'/search-encoded').hexdigest();benign=__import__('hashlib').sha256(b'/search--catalog').hexdigest()
+        check('Encoded and benign requests are classified consistently by both sources',all(d.get('sqli_signature') is True for d in details if d.get('path_hash')==encoded) and sum(d.get('path_hash')==encoded for d in details)==2 and all(d.get('sqli_signature') is False for d in details if d.get('path_hash')==benign) and sum(d.get('path_hash')==benign for d in details)==2)
         raw=json.dumps(details)
         check('Passwords, session tokens and injection text are excluded',all(secret not in raw for secret in ('test-password',session,'IGNORE ALL RULES','SECRET')))
         wait(lambda:read("SELECT id FROM cases WHERE subject LIKE ? AND json_array_length(evidence_json,'$.edges')>=2",(app+':%',)))
@@ -84,9 +88,9 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         for n in range(95):
             append('backend',dict(ts=time.time(),audit=dict(action='permission_changed' if n==94 else 'security_alert',session=session,request='continuation-'+str(n),actor='alice',remote='127.0.0.1',result='success')))
             if n==44:
-                wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=70)
+                wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=74)
                 restart()
-        wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=120)
+        wait(lambda:len(read("SELECT event_id FROM correlation_events WHERE subject=?",(app,)))>=124)
         parts=read("SELECT c.id,p.root_id,p.part FROM cases c JOIN case_parts p ON p.case_id=c.id WHERE c.subject LIKE ?",(app+':%',))
         check('Installed core persists continuation parts',max(r[2] for r in parts)>=4)
         missing=read("SELECT e.event_id FROM correlation_events e WHERE e.subject=? AND json_extract(e.details_json,'$.request_id_hash') IN ("+','.join('?' for _ in range(95))+") AND NOT EXISTS (SELECT 1 FROM case_events c WHERE c.event_id=e.event_id)",(app,*[__import__('hashlib').sha256(('continuation-'+str(n)).encode()).hexdigest() for n in range(95)]))
@@ -104,10 +108,11 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         data['cases']=[c for c in data['cases'] if c['subject'].startswith(app+':')]
         data['observations']=[o for o in data['observations'] if o.get('subject')==app]
         pathlib.Path('/tmp/aegis-application-preview.json').write_text(json.dumps(data))
-        outcome=wait(lambda:read("SELECT status,analysis_json FROM cases WHERE subject LIKE ? AND (json_extract(analysis_json,'$.summary') IS NOT NULL OR status='analysis_error')",(app+':%',)),110)
-        assessed=bool(json.loads(outcome[0][1]).get('summary'))
-        check('Independent case receives assessment or explicit bounded manual review',assessed or outcome[0][0]=='analysis_error')
-        print(json.dumps({'model_assessed':assessed,'case_status':outcome[0][0]}),flush=True)
+        if '--skip-model' not in sys.argv:
+            outcome=wait(lambda:read("SELECT status,analysis_json FROM cases WHERE subject LIKE ? AND (json_extract(analysis_json,'$.summary') IS NOT NULL OR status='analysis_error')",(app+':%',)),110)
+            assessed=bool(json.loads(outcome[0][1]).get('summary'))
+            check('Independent case receives assessment or explicit bounded manual review',assessed or outcome[0][0]=='analysis_error')
+            print(json.dumps({'model_assessed':assessed,'case_status':outcome[0][0]}),flush=True)
         data=console.read_snapshot('/var/lib/defense-agent/incidents.db');data['cases']=[c for c in data['cases'] if c['subject'].startswith(app+':')];data['observations']=[o for o in data['observations'] if o.get('subject')==app]
         pathlib.Path('/tmp/aegis-application-preview.json').write_text(json.dumps(data))
     finally:

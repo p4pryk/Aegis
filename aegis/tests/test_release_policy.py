@@ -38,6 +38,11 @@ class Modes(unittest.TestCase):
     def test_config_rejects_typo_and_injection(self):
         for config in ({'response_mode':'enfore'},{'response_users':['root;id']},{'protected_groups':'sudo'},{'lab_response_enabled':'false'}):
             with self.assertRaises(ValueError):policy.validate(config)
+    def test_proxy_context_mapping_is_explicit_and_bounded(self):
+        valid={'web_context_units':{'myapp.service':['nginx.service']}}
+        self.assertEqual(policy.validate(valid),valid)
+        for value in ('nginx.service',{'*.service':['nginx.service']},{'app.service':'nginx.service'},{'app.service':['../../evil.service']},{'app.service':['proxy.service']*17}):
+            with self.subTest(value=value),self.assertRaises(ValueError):policy.validate({'web_context_units':value})
 
     def test_protected_networks_cover_both_address_families(self):
         config=dict(self.c,protected_ips=['198.51.100.0/24','2001:db8::/32'])

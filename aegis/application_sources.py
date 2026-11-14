@@ -1,8 +1,7 @@
 """Application-independent, metadata-only file adapters. All producer claims are untrusted."""
 import datetime,hashlib,ipaddress,json,math,pathlib,re,stat,time
-from urllib.parse import unquote_plus
 from file_logs import Files
-from journal_sources import SQLI
+from journal_sources import sqli_signature
 
 FIELDS=('time','event','outcome','user','ip','request_id','session_id','method','path','status')
 EVENTS=('http_request','authentication','account_created','permission_changed','security_alert','application_error')
@@ -102,7 +101,7 @@ def parse(raw,source,identifier):
         if not isinstance(path,str) or len(path)>4096 or not path.startswith('/') or any(ord(c)<32 for c in path):raise ValueError('Invalid request target')
         # Query/body/headers are never persisted. Paths may contain identifiers: retain only a hash.
         d['path_hash']=hashlib.sha256(path.split('?',1)[0].split('#',1)[0].encode()).hexdigest()
-        d['sqli_signature']=bool(SQLI.search(unquote_plus(path)))
+        d['sqli_signature']=sqli_signature(path)
     d['review_signal']=bool(d.get('sqli_signature') or event in ('account_created','permission_changed','security_alert','application_error'))
     return dict(event_id=identifier,event_time=stamp,kind='application_event',subject=source['application'],details=d)
 

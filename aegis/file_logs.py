@@ -85,6 +85,15 @@ class Files:
                 else:h.pop('pending_since',None)
                 h.update(status='GAP' if gap else 'LAGGING' if pending and h['lag_seconds']>=5 else 'LIVE' if now-h.get('last_record_at',0)<30 else 'QUIET',reason='Invalid input, rotation/truncation or bounded startup replay: continuity is not guaranteed' if gap else 'File is readable; producer liveness is not independently verified')
             except (OSError,ValueError) as exc:
+                if not isinstance(exc,FileNotFoundError):
+                    # Do not keep reading an inode after it became unsafe or failed.
+                    stream=self.handles.pop(path,None)
+                    if stream:
+                        try:stream.close()
+                        except OSError:pass
+                    cursor=self.engine.store.state(key) or {}
+                    cursor.update(gap=True,invalid=h['invalid'],unrecognized=h['unrecognized'])
+                    self.engine.store.state(key,cursor)
                 h.update(status='MISSING' if isinstance(exc,FileNotFoundError) else 'DOWN',reason=type(exc).__name__+': source unavailable or unsafe',checked_at=now,pending=0,unit='bytes',lag_seconds=0)
         return count
     def cursor_key(self,category,path):

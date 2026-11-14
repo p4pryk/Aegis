@@ -19,6 +19,10 @@ def validate(config):
     for address in config.get('protected_ips',[]):ipaddress.ip_network(address,strict=False)
     if type(config.get('incident_context_seconds',3600)) is not int or not 120<=config.get('incident_context_seconds',3600)<=3600:
         raise ValueError('incident_context_seconds must be 120–3600')
+    mapping=config.get('web_context_units',{})
+    unit=lambda value:isinstance(value,str) and bool(re.fullmatch(r'[A-Za-z0-9_.@:-]{1,120}\.service',value))
+    if not isinstance(mapping,dict) or len(mapping)>32 or any(not unit(name) or not isinstance(values,list) or len(values)>16 or any(not unit(value) for value in values) for name,values in mapping.items()):
+        raise ValueError('Invalid web_context_units')
     return config
 
 def account_allowed(name, config):

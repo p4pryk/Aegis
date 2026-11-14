@@ -426,12 +426,17 @@ class CorrelatedEngine:
                 unit=line.rsplit(':',1)[-1].split('/')[-1]
                 if unit in units:observed.add(unit)
         if not observed:return []
+        allowed=set(observed);mapping=self.c.get('web_context_units',{})
+        if isinstance(mapping,dict):
+            for unit in observed:
+                values=mapping.get(unit,[])
+                if isinstance(values,list):allowed.update(value for value in values[:16] if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.@:-]{1,120}\.service',value))
         start=min(e['event_time'] for e in lineage)-30
-        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? ORDER BY abs(event_time-?) LIMIT 64",(start,until,until)).fetchall()
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.boot_id')=? AND json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in allowed)+") ORDER BY CASE WHEN json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in observed)+") THEN 0 ELSE 1 END,abs(event_time-?) LIMIT 64",(start,until,self.boot_id,*allowed,*observed,until)).fetchall()
         result=[]
         for r in rows:
             details=json.loads(r[4])
-            if details.get('boot_id')==self.boot_id and (details.get('unit') in observed or r[2]=='http_sqli_signature'):
+            if details.get('boot_id')==self.boot_id and details.get('unit') in allowed:
                 result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
         return result
     def http_request_context(self,source):

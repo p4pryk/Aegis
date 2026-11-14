@@ -4,10 +4,22 @@ import json
 import pathlib
 import re
 import uuid
+from urllib.parse import unquote_plus
 
 SAFE = re.compile(r'[A-Za-z0-9_.@:-]{1,128}')
 ACCESS = re.compile(r'^(\S+) \S+ \S+ \[[^\]]+\] "([A-Z]{3,10}) (\S+) HTTP/[0-9.]+" ([0-9]{3}) (?:\d+|-)')
-SQLI = re.compile(r"(?i)(?:union(?:\s|%20|\+)+select|(?:%27|')\s*(?:or|and)(?:\s|%20|\+)+|(?:--|%2d%2d)|sleep(?:%28|\())")
+SQLI = re.compile(r"(?i)(?:\bunion\s+(?:all\s+)?select\b|['\"]\s*(?:or|and)\b(?:\s+|['\"(])|['\"]\s*(?:--|#)|\d\s*--(?:\s|$|[&#])|\b(?:sleep|pg_sleep|benchmark)\s*\(|\bwaitfor\s+delay\b)")
+
+
+def sqli_signature(target):
+    if not isinstance(target,str):return False
+    value=target[:8192]
+    for _ in range(2):
+        decoded=unquote_plus(value)
+        if decoded==value:break
+        value=decoded
+    value=re.sub(r'/\*[^*]{0,64}\*/',' ',value)
+    return bool(SQLI.search(value))
 
 
 def normalize_boot_id(value):
@@ -135,7 +147,7 @@ def parse(record, boot_id, config):
             target = access[3]
             path = target.split('?', 1)[0].split('#', 1)[0][:256]
             details.update(ip=ip, method=access[2], path=path, status=int(access[4]))
-            if SQLI.search(target):
+            if sqli_signature(target):
                 kind, description = 'http_sqli_signature', 'HTTP request matched a SQL-injection signature; success is unconfirmed.'
             else:
                 kind, description = 'http_request', 'HTTP access record received from a monitored service.'

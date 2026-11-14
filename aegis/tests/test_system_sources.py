@@ -162,6 +162,17 @@ class FileSources(unittest.TestCase):
         self.files.close();self.files=file_logs.Files(self.e,{'auth':str(self.path)});self.addCleanup(self.files.close)
         self.files.poll(True)
         self.assertEqual((self.files.health['auth']['invalid'],self.files.health['auth']['status']),(1,'GAP'))
+    def test_unsafe_open_log_recovers_after_safe_replacement(self):
+        self.write('authentication failure user=alice');self.files.poll(True)
+        self.path.chmod(0o666);self.write('authentication failure user=unsafe');self.files.poll(True)
+        self.assertEqual(self.files.health['auth']['status'],'DOWN');self.assertNotIn(str(self.path),self.files.handles)
+        self.path.rename(self.root/'old-unsafe');self.write('authentication failure user=bob','w');self.path.chmod(0o640)
+        self.files.poll(True)
+        subjects={row[0] for row in self.store.db.execute('SELECT subject FROM observations')}
+        self.assertEqual(subjects,{'alice','bob'});self.assertEqual(self.files.health['auth']['status'],'GAP')
+        self.files.close();self.files=file_logs.Files(self.e,{'auth':str(self.path)});self.addCleanup(self.files.close)
+        self.files.poll(True)
+        self.assertEqual((self.files.health['auth']['invalid'],self.files.health['auth']['status']),(0,'GAP'))
     def test_syslog_auth_copy_is_skipped_but_repeated_auth_records_are_kept(self):
         other=self.root/'syslog';self.write('authentication failure user=alice');other.write_text(self.path.read_text());other.chmod(0o640)
         self.files.close();self.files=file_logs.Files(self.e,{'auth':str(self.path),'system':str(other)});self.addCleanup(self.files.close)

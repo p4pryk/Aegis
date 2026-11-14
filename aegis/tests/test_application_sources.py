@@ -103,6 +103,16 @@ class Applications(unittest.TestCase):
         self.path.chmod(0o666);self.files.poll(True);self.assertEqual(self.files.health['backend']['status'],'DOWN')
         self.path.unlink();self.files.poll(True);self.assertEqual(self.files.health['backend']['status'],'MISSING')
         self.path.symlink_to('/etc/passwd');self.files.poll(True);self.assertEqual(self.files.health['backend']['status'],'DOWN')
+    def test_unsafe_open_inode_is_closed_and_safe_replacement_recovers_with_gap(self):
+        self.append(user='before');self.files.poll(True)
+        self.path.chmod(0o666);self.append(user='untrusted');self.files.poll(True)
+        self.assertEqual(self.files.health['backend']['status'],'DOWN');self.assertNotIn(str(self.path),self.files.handles)
+        self.path.rename(self.root/'unsafe-old');self.path.write_text('');self.path.chmod(0o600);self.append(user='after')
+        self.files.poll(True)
+        users={json.loads(row[0])['user'] for row in self.store.db.execute("SELECT details_json FROM correlation_events WHERE kind='application_event'")}
+        self.assertEqual(users,{'before','after'});self.assertEqual(self.files.health['backend']['status'],'GAP')
+        self.files.close();self.files=apps.Applications(self.engine);self.addCleanup(self.files.close);self.files.poll(True)
+        self.assertEqual(self.files.health['backend']['status'],'GAP')
     def test_invalid_and_stale_counted_without_raw_payloads(self):
         self.path.write_text('not JSON\n'+json.dumps({'time':0,'event':'security_alert'})+'\n'+json.dumps({'time':time.time(),'event':'unknown'})+'\n')
         self.files.poll(True);h=self.files.health['backend'];self.assertEqual((h['invalid'],h['stale'],h['unrecognized']),(1,1,1));self.assertFalse(self.cases())
