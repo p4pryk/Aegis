@@ -432,7 +432,7 @@ class CorrelatedEngine:
                 values=mapping.get(unit,[])
                 if isinstance(values,list):allowed.update(value for value in values[:16] if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.@:-]{1,120}\.service',value))
         start=min(e['event_time'] for e in lineage)-30
-        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.boot_id')=? AND json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in allowed)+") ORDER BY CASE WHEN json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in observed)+") THEN 0 ELSE 1 END,abs(event_time-?) LIMIT 64",(start,until,self.boot_id,*allowed,*observed,until)).fetchall()
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature','http_attack_signature') AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.boot_id')=? AND json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in allowed)+") ORDER BY CASE WHEN json_extract(details_json,'$.unit') IN ("+','.join('?' for _ in observed)+") THEN 0 ELSE 1 END,abs(event_time-?) LIMIT 64",(start,until,self.boot_id,*allowed,*observed,until)).fetchall()
         result=[]
         for r in rows:
             details=json.loads(r[4])
@@ -442,7 +442,7 @@ class CorrelatedEngine:
     def http_request_context(self,source):
         d=source['details'];request_id=d.get('request_id')
         if not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id):return []
-        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature') AND event_time BETWEEN ? AND ? ORDER BY abs(event_time-?) LIMIT 128",(source['event_time']-2,source['event_time']+2,source['event_time'])).fetchall()
+        rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature','http_attack_signature') AND event_time BETWEEN ? AND ? ORDER BY abs(event_time-?) LIMIT 128",(source['event_time']-2,source['event_time']+2,source['event_time'])).fetchall()
         path={'app_login':'/login','app_account_job':'/accounts','app_persistence_job':'/persistence'}.get(source['kind'])
         result=[]
         for r in rows:
@@ -502,7 +502,7 @@ class CorrelatedEngine:
         if not self.remember(event):return
         self.store.observe('journald',event['kind'],event['subject'],description,event['event_id'],event['event_time'])
         if event['details']['boot_id']!=self.boot_id:return
-        if event['kind']=='http_sqli_signature':self.create_or_append('waf_threshold',event['subject'],event)
+        if event['kind'] in ('http_sqli_signature','http_attack_signature'):self.create_or_append('waf_threshold',event['subject'],event)
     def enrich_ssh_accounts(self):
         for r in self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='account_created' AND event_time>?",(time.time()-60,)).fetchall():
             self.correlate_ssh_account(dict(event_id=r[0],event_time=r[1],kind=r[2],subject=r[3],details=json.loads(r[4])))
@@ -677,12 +677,12 @@ class CorrelatedEngine:
                         allowed=[dict(action='quarantine_account',user=subject)];required=[e['event_id'] for e in chain]+[account['event_id']]
                         for parent,child in zip(chain,chain[1:]):edges.append({'from':parent['event_id'],'to':child['event_id'],'relation':'kernel_ppid_and_matching_parent_start_ticks'})
                         edges.append({'from':chain[-1]['event_id'],'to':account['event_id'],'relation':'same_boot_producer_pid_auid_session'})
-                if chain:edges.extend({'from':e['event_id'],'to':chain[0]['event_id'],'relation':'nearby_http_time_context_not_causal'} for e in events if e['kind'] in ('http_request','http_sqli_signature'))
+                if chain:edges.extend({'from':e['event_id'],'to':chain[0]['event_id'],'relation':'nearby_http_time_context_not_causal'} for e in events if e['kind'] in ('http_request','http_sqli_signature','http_attack_signature'))
         for request in (e for e in events if e['kind']=='http_request' and e['details'].get('request_id')):
             match=next((e for e in events if e['kind'] in ('app_login','app_account_job','app_persistence_job') and e['details'].get('request_id')==request['details']['request_id']),None)
             if match:edges.append({'from':request['event_id'],'to':match['event_id'],'relation':'shared_server_generated_request_id'})
         if kind in ('app_sql_login','app_sql_account','app_sql_persistence'):
-            for request in (e for e in events if e['kind'] in ('http_request','http_sqli_signature')):
+            for request in (e for e in events if e['kind'] in ('http_request','http_sqli_signature','http_attack_signature')):
                 if request['details'].get('request_id'):continue
                 app_kind={'/login':'app_login','/accounts':'app_account_job','/persistence':'app_persistence_job'}.get(request['details'].get('path'))
                 match=next((e for e in events if e['kind']==app_kind and e['details'].get('ip')==request['details'].get('ip') and abs(e['event_time']-request['event_time'])<=2),None) if app_kind else None

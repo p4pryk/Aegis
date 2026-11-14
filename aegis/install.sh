@@ -111,6 +111,9 @@ fi
 for path in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron/crontabs; do
   [ ! -d "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
 done
+for path in /root/.bashrc /root/.bash_profile /root/.profile /root/.zshrc /root/.config/systemd/user; do
+  [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
+done
 # Preserve the existing administrator's access while making SSH failures observable.
 if [ -x /usr/sbin/sshd ]; then
 printf '%s\n' 'LogLevel VERBOSE' > /etc/ssh/sshd_config.d/60-aegis-observability.conf

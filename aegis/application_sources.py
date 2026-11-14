@@ -1,7 +1,7 @@
 """Application-independent, metadata-only file adapters. All producer claims are untrusted."""
 import datetime,hashlib,ipaddress,json,math,pathlib,re,stat,time
 from file_logs import Files
-from journal_sources import sqli_signature
+from journal_sources import sqli_signature,web_request_signals
 
 FIELDS=('time','event','outcome','user','ip','request_id','session_id','method','path','status')
 EVENTS=('http_request','authentication','account_created','permission_changed','security_alert','application_error')
@@ -102,7 +102,9 @@ def parse(raw,source,identifier):
         # Query/body/headers are never persisted. Paths may contain identifiers: retain only a hash.
         d['path_hash']=hashlib.sha256(path.split('?',1)[0].split('#',1)[0].encode()).hexdigest()
         d['sqli_signature']=sqli_signature(path)
-    d['review_signal']=bool(d.get('sqli_signature') or event in ('account_created','permission_changed','security_alert','application_error'))
+        signals=web_request_signals(path)
+        if signals:d['web_signals']=signals
+    d['review_signal']=bool(d.get('sqli_signature') or d.get('web_signals') or event in ('account_created','permission_changed','security_alert','application_error'))
     return dict(event_id=identifier,event_time=stamp,kind='application_event',subject=source['application'],details=d)
 
 def ingest(engine,event):
@@ -136,7 +138,7 @@ def carry_context(events):
     anchors={}
     for event in events:
         d=event['details']
-        key=('authentication',d.get('outcome')) if d.get('event')=='authentication' else ('sqli',) if d.get('sqli_signature') else (d.get('event'),)
+        key=('authentication',d.get('outcome')) if d.get('event')=='authentication' else ('sqli',) if d.get('sqli_signature') else ('web_probe',) if d.get('web_signals') else (d.get('event'),)
         if d.get('review_signal') or d.get('event')=='authentication':anchors[key]=event
     selected={e['event_id']:e for e in [*list(anchors.values())[:6],*events[-2:]]}
     return list(selected.values())[:8]

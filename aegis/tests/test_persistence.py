@@ -3,6 +3,26 @@ from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import agent,persistence
 class PersistenceTests(unittest.TestCase):
+    def test_user_startup_and_systemd_paths_are_bounded(self):
+        for path in ('/home/alice/.bashrc','/home/alice/.bash_profile','/home/alice/.profile','/root/.zshrc','//home/alice/.bashrc','//root/.profile'):
+            with self.subTest(path=path):self.assertEqual(persistence.scope(path),'shell_startup')
+        for path in ('/home/alice/.config/systemd/user/worker.service','/home/alice/.config/systemd/user/default.target.wants/worker.service','/root/.config/systemd/user/worker.service.d/override.conf','/root/.config/systemd/user/worker.timer'):
+            with self.subTest(path=path):self.assertEqual(persistence.scope(path),'systemd_user')
+        for path in ('/home/alice/work/.bashrc','/home/alice/.bash_history','/tmp/.profile','/home/alice/.config/systemd/user/environment','/home/alice/../bob/.bashrc','/root/.config/systemd/user/a/b/c/d.service'):
+            with self.subTest(path=path):self.assertIsNone(persistence.scope(path))
+    def test_user_persistence_is_review_only_and_never_quarantined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config=dict(agent.DEFAULTS,data_dir=directory,persistence_enabled=True,protected_ips=[])
+            store=agent.Store(config);engine=agent.CorrelatedEngine(config,store,lambda _:self.fail('unexpected action'))
+            try:
+                for n,path in enumerate(('/home/alice/.bash_profile','/home/alice/.config/systemd/user/worker.service')):
+                    stamp=time.time();serial=39000+n
+                    for line in (f'type=SYSCALL msg=audit({stamp}:{serial}): success=yes pid=9001 uid=1002 auid=1002 ses=42 exe="/usr/bin/python3" key="aegis_persistence"',f'type=PATH msg=audit({stamp}:{serial}): item=0 name="{path}" nametype=CREATE',f'type=EOE msg=audit({stamp}:{serial}):'):
+                        engine.audit_line(line)
+                    row=store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='persistence_change' AND subject=?",(path,)).fetchone()
+                    self.assertIsNotNone(row);self.assertEqual(engine.snapshot(*row)['allowed_actions'],[])
+                    self.assertFalse(persistence.lab_path(path))
+            finally:store.db.close()
     def test_incomplete_overloaded_and_oversized_audit_groups_report_durable_gap(self):
         with tempfile.TemporaryDirectory() as directory:
             config=dict(agent.DEFAULTS,data_dir=directory,persistence_enabled=True)

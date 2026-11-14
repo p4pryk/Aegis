@@ -46,6 +46,17 @@ class Telemetry(unittest.TestCase):
         self.assertEqual(event[:2],('persistence_change','/home/lab_actor/.ssh/authorized_keys'))
         self.assertEqual(json.loads(event[2])['audited_inode']['mode'],'0100600');self.assertNotIn('never-keep-me',event[2])
 
+    def test_user_startup_and_systemd_file_link_to_exact_ssh_session(self):
+        self.login()
+        self.file('/home/lab_actor/.bash_profile')
+        self.file('/home/lab_actor/.config/systemd/user/test.service')
+        telemetry.enrich(self.e,self.now+3)
+        for row in self.e.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='persistence_change'").fetchall():
+            evidence=self.e.snapshot(*row)
+            self.assertIn('ssh_session_open',{e['kind'] for e in evidence['events']})
+            self.assertTrue(any(edge['relation']=='exact_audit_session_attribution_not_causal' for edge in evidence['edges']))
+            self.assertEqual(evidence['allowed_actions'],[])
+
     def test_unresolved_relative_and_unwatched_paths_ignored(self):
         self.file('authorized_keys');self.file('/tmp/random')
         self.assertEqual(self.e.db.execute('SELECT count(*) FROM correlation_events').fetchone()[0],0)

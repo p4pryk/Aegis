@@ -7,6 +7,12 @@ def scope(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
     if p.name=='authorized_keys' and p.parent.name=='.ssh':return 'ssh_key'
+    parts=None
+    if len(p.parts)>1 and p.parts[1]=='root':parts=p.parts[2:]
+    elif len(p.parts)>2 and p.parts[1]=='home':parts=p.parts[3:]
+    if parts is not None:
+        if len(parts)==1 and parts[0] in ('.bashrc','.bash_profile','.profile','.zshrc'):return 'shell_startup'
+        if parts[:3]==('.config','systemd','user') and 4<=len(parts)<=6 and p.suffix in ('.service','.timer','.conf'):return 'systemd_user'
     if str(p)=='/etc/crontab' or str(p.parent) in ('/etc/cron.d','/etc/cron.hourly','/etc/cron.daily','/etc/cron.weekly','/etc/cron.monthly','/var/spool/cron/crontabs'):return 'cron'
     if '/'.join(p.parts[1:4])=='etc/systemd/system' and len(p.parts)<=6 and p.suffix in ('.service','.timer','.conf'):return 'systemd'
 

@@ -23,11 +23,11 @@ def timeline(case):
     if not events:lines.append(('Evidence snapshot not yet available.','warning'))
     for event in events:
         d=event.get('details',{})
-        source=d.get('source') or ('journald' if event['kind'] in ('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','http_request','http_sqli_signature','service_event') else 'application' if event['kind'].startswith('app_') else 'sshd journal' if event['kind']=='ssh_failure' else 'auditd')
+        source=d.get('source') or ('journald' if event['kind'] in ('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','http_request','http_sqli_signature','http_attack_signature','service_event') else 'application' if event['kind'].startswith('app_') else 'sshd journal' if event['kind']=='ssh_failure' else 'auditd')
         stamp=datetime.datetime.fromtimestamp(event['event_time'],datetime.timezone.utc).isoformat(timespec='milliseconds')
         label=d.get('path') or d.get('exe') or event['subject']
         lines.append((f"#{numbers[event['event_id']]} {stamp} [{source}] {event['kind']}: {label}",'neutral'))
-        fields=('user','actor','target_user','command','op','acct','grp','id','new_uid','new_gid','old_uid','old_gid','pid','ppid','start_ticks','parent_start_ticks','boot_id','audit_session','session','auid','uid','operation','mechanism','request_id','application','event','outcome','status','trust')
+        fields=('user','actor','target_user','command','op','acct','grp','id','new_uid','new_gid','old_uid','old_gid','pid','ppid','start_ticks','parent_start_ticks','boot_id','audit_session','session','auid','uid','operation','mechanism','request_id','application','event','outcome','status','trust','web_signals')
         context=' | '.join(k+'='+str(d[k]) for k in fields if d.get(k) is not None and not (k=='session' and event['kind'].startswith('app_')))
         if context:lines.append(('  '+context,'neutral'))
         if event['kind'] in ('identity_change','security_file_change','persistence_change') and not d.get('start_ticks'):

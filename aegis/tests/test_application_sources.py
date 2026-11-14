@@ -70,6 +70,16 @@ class Applications(unittest.TestCase):
         a=self.event('authentication',session_id='s1');b=self.event('security_alert',session_id='s1')
         a['event_time']-=15;self.insert(b);self.insert(a)
         self.assertEqual(len(self.snapshot()['edges']),1);self.assertEqual(self.snapshot()['edges'][0]['from'],a['event_id'])
+    def test_web_probe_survives_application_continuation_without_authorizing_action(self):
+        probe=self.event('http_request',session_id='s1',path='/download?file=..%2fetc%2fpasswd&token=SECRET',status=200)
+        self.insert(probe)
+        self.insert(self.event('account_created',session_id='s1',outcome='success'))
+        for n in range(40):self.insert(self.event('security_alert',session_id='s1',request_id='r'+str(n)))
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='application_activity' ORDER BY created_at DESC").fetchall()
+        self.assertGreater(len(rows),1);evidence=self.engine.snapshot(*rows[0])
+        self.assertTrue(any('path_traversal' in e['details'].get('web_signals',[]) for e in evidence['events']))
+        self.assertFalse(evidence['allowed_actions']);self.assertNotIn('SECRET',json.dumps(evidence))
+        self.assertTrue(all('not_causal' in edge['relation'] for edge in evidence['edges']))
     def test_many_actors_are_isolated(self):
         for n in range(80):self.insert(self.event('security_alert',user='user'+str(n)))
         self.assertEqual(len(self.cases()),80);self.assertEqual(len(self.snapshot()['events']),1)

@@ -9,17 +9,33 @@ from urllib.parse import unquote_plus
 SAFE = re.compile(r'[A-Za-z0-9_.@:-]{1,128}')
 ACCESS = re.compile(r'^(\S+) \S+ \S+ \[[^\]]+\] "([A-Z]{3,10}) (\S+) HTTP/[0-9.]+" ([0-9]{3}) (?:\d+|-)')
 SQLI = re.compile(r"(?i)(?:\bunion\s+(?:all\s+)?select\b|['\"]\s*(?:or|and)\b(?:\s+|['\"(])|['\"]\s*(?:--|#)|\d\s*--(?:\s|$|[&#])|\b(?:sleep|pg_sleep|benchmark)\s*\(|\bwaitfor\s+delay\b)")
+TRAVERSAL = re.compile(r'(?:^|[/?=&])(?:\.\./)+')
+SENSITIVE_PATHS=('/.env','/.git/config','/.svn/entries','/.aws/credentials','/.ssh/id_rsa','/etc/passwd','/etc/shadow','/proc/self/environ','/actuator/env')
 
 
-def sqli_signature(target):
-    if not isinstance(target,str):return False
+def decode_target(target):
+    if not isinstance(target,str):return ''
     value=target[:8192]
     for _ in range(2):
         decoded=unquote_plus(value)
         if decoded==value:break
         value=decoded
+    return value
+
+
+def sqli_signature(target):
+    value=decode_target(target)
     value=re.sub(r'/\*[^*]{0,64}\*/',' ',value)
     return bool(SQLI.search(value))
+
+
+def web_request_signals(target):
+    value=decode_target(target).replace('\\','/')
+    path=value.split('?',1)[0].split('#',1)[0].lower().rstrip('/')
+    signals=[]
+    if TRAVERSAL.search(value):signals.append('path_traversal')
+    if any(path.endswith(suffix) for suffix in SENSITIVE_PATHS):signals.append('sensitive_file_probe')
+    return signals
 
 
 def normalize_boot_id(value):
@@ -147,8 +163,12 @@ def parse(record, boot_id, config):
             target = access[3]
             path = target.split('?', 1)[0].split('#', 1)[0][:256]
             details.update(ip=ip, method=access[2], path=path, status=int(access[4]))
+            signals=web_request_signals(target)
+            if signals:details['web_signals']=signals
             if sqli_signature(target):
                 kind, description = 'http_sqli_signature', 'HTTP request matched a SQL-injection signature; success is unconfirmed.'
+            elif signals:
+                kind, description = 'http_attack_signature', 'HTTP request matched a traversal or sensitive-file probe; access is unconfirmed.'
             else:
                 kind, description = 'http_request', 'HTTP access record received from a monitored service.'
             subject = ip

@@ -3,6 +3,7 @@
 import json,os,pathlib,pwd,shutil,sqlite3,subprocess,sys,time
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
 import console,telemetry
+from lab_cleanup import remove_test_user
 
 DB='/var/lib/defense-agent/incidents.db'
 results=[];suffix=str(time.time_ns())[-9:];actor='lab_tel_'+suffix;group='lab_tg_'+suffix
@@ -42,6 +43,7 @@ def main():
     if os.geteuid()!=0:raise SystemExit('Run as root on the isolated training VM')
     root.mkdir(mode=0o755)
     cmd(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(root/'key')])
+    if os.path.lexists('/home/'+actor):raise RuntimeError('Test home already exists')
     cmd(['useradd','-m','-s','/bin/bash',actor]);created=True
     cmd(['usermod','-p','*',actor]);cmd(['groupadd',group]);group_created=True
     home=pathlib.Path(pwd.getpwnam(actor).pw_dir);sshdir=home/'.ssh';sshdir.mkdir(mode=0o700)
@@ -57,16 +59,18 @@ def main():
         f'os.chdir({str(sshdir)!r});os.chmod("authorized_keys",0o600)\n')
     sudo.write_text(f'{actor} ALL=(root) NOPASSWD: /usr/bin/python3 {script}, /usr/bin/true\n');sudo.chmod(0o440)
     cmd(['visudo','-cf',str(sudo)])
+    # Keep the sender alive while journald resolves trusted process/session metadata.
+    emit=root/'emit.py';emit.write_text('import socket,sys,time\n'+'s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM);s.connect("/dev/log")\n'+'s.send(("<14>polkitd: Operator FAILED to authenticate for action "+sys.argv[1]).encode());time.sleep(3)\n');emit.chmod(0o644)
     prefix=['ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=3','-i',str(root/'key'),actor+'@127.0.0.1']
     started=time.time()
-    idle=subprocess.Popen(prefix+['logger -t polkitd "Operator FAILED to authenticate for action AEGIS_OTHER_SESSION"; sudo /usr/bin/true; sleep 90'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);processes.append(idle)
+    idle=subprocess.Popen(prefix+['python3 '+str(emit)+' AEGIS_OTHER_SESSION; sudo /usr/bin/true; sleep 90'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);processes.append(idle)
     sessions=lambda:query("SELECT * FROM ssh_sessions WHERE event_time>=? AND json_extract(details_json,'$.user')=?",(started,actor))
     idle_session=wait(sessions)[0]['identity']
     def idle_polkit():
         rows=query("SELECT details_json FROM correlation_events WHERE kind='system_authorization_denied' AND event_time>=?",(started,))
         return any(':'.join(telemetry.identity(json.loads(row['details_json'])) or ())==idle_session for row in rows)
     wait(idle_polkit)
-    cmd(prefix+['logger -t polkitd "Operator FAILED to authenticate for action AEGIS_MATCHING_SESSION"; sudo /usr/bin/python3 '+str(script)])
+    cmd(prefix+['python3 '+str(emit)+' AEGIS_MATCHING_SESSION; sudo /usr/bin/python3 '+str(script)])
     changes=lambda:query("SELECT * FROM correlation_events WHERE event_time>=? AND kind IN ('identity_change','security_file_change','persistence_change')",(started,))
     def complete():
         rows=changes();paths={json.loads(r['details_json']).get('path') for r in rows}
@@ -114,7 +118,9 @@ if __name__=='__main__':
             try:process.wait(timeout=3)
             except subprocess.TimeoutExpired:process.kill();process.wait()
         for path in (sudo,rule,cron,unit):path.unlink(missing_ok=True)
-        if created:cmd(['pkill','-u',actor],False);cmd(['userdel','-r',actor],False)
-        if group_created:cmd(['groupdel',group],False)
-        shutil.rmtree(root,ignore_errors=True)
-        pathlib.Path('/tmp/aegis-telemetry-results.json').write_text(json.dumps(results,indent=2))
+        try:
+            if created:remove_test_user(actor)
+        finally:
+            if group_created:cmd(['groupdel',group],False)
+            shutil.rmtree(root,ignore_errors=True)
+            pathlib.Path('/tmp/aegis-telemetry-results.json').write_text(json.dumps(results,indent=2))

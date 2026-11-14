@@ -1,7 +1,7 @@
 import json,pathlib,sys,tempfile,time,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
-import agent,application_sources
+import agent,application_sources,incident_view,presentation
 from journal_sources import parse
 
 class JournalTelemetryTests(unittest.TestCase):
@@ -89,5 +89,41 @@ class JournalTelemetryTests(unittest.TestCase):
         self.engine.journal_context(self.record('nginx.service',self.ip+' - - [01/Jan/2026:12:00:00 +0000] "GET /?q=union%252F%252A%252A%252Fselect HTTP/1.1" 200 123'))
         row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone()
         self.assertIsNotNone(row);self.assertFalse(self.engine.snapshot(*row)['allowed_actions'])
+
+    def test_http_probe_signals_are_bounded_context_not_success_or_action(self):
+        targets=(('/download?file=%252e%252e%252f%252e%252e%252fetc%252fpasswd&token=SECRET',['path_traversal']),('/.git/config?token=SECRET',['sensitive_file_probe']),('/static/.env',['sensitive_file_probe']),('/download?file=..%255c..%255cetc%255cpasswd',['path_traversal']),('/docs/version..notes',[]),('/.well-known/security.txt',[]))
+        source={'name':'access','application':'app','format':'jsonl'}
+        for target,expected in targets:
+            with self.subTest(target=target):
+                msg=self.ip+' - - [01/Jan/2026:12:00:00 +0000] "GET '+target+' HTTP/1.1" 200 123'
+                journal=parse(self.record('nginx.service',msg),self.engine.boot_id,self.config)
+                app=application_sources.parse(json.dumps({'time':self.when,'event':'http_request','ip':self.ip,'method':'GET','path':target,'status':200}),source,'fixture')
+                self.assertEqual(journal['details'].get('web_signals',[]),expected)
+                self.assertEqual(app['details'].get('web_signals',[]),expected)
+                self.assertEqual(journal['kind']=='http_attack_signature',bool(expected))
+                self.assertEqual(app['details']['review_signal'],bool(expected))
+                self.assertNotIn('SECRET',json.dumps(journal['details']));self.assertNotIn('SECRET',json.dumps(app['details']))
+                self.assertNotIn('outcome',journal['details']);self.assertNotIn('outcome',app['details'])
+        msg=self.ip+' - - [01/Jan/2026:12:00:00 +0000] "GET /download?file=..%2Fetc%2Fpasswd HTTP/1.1" 200 123'
+        self.engine.journal_context(self.record('nginx.service',msg))
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone();evidence=self.engine.snapshot(*row)
+        self.assertFalse(evidence['allowed_actions'])
+        event=next(e for e in evidence['events'] if e['kind']=='http_attack_signature')
+        self.assertEqual(presentation.event_display(event)['level'],'warning')
+        case={'id':row[0],'kind':row[1],'status':'collecting','evidence_json':json.dumps(evidence)}
+        self.assertIn('path_traversal',' '.join(text for text,_ in incident_view.timeline(case)))
+
+    def test_http_probe_joins_matching_web_service_only_as_context(self):
+        self.config['web_units']=['nginx.service']
+        lineage=[self.engine.normalize('process_exec','pid',{'cgroup':'0::/system.slice/nginx.service'},'proc',self.when-3)]
+        probe=self.engine.normalize('http_attack_signature',self.ip,{'boot_id':self.engine.boot_id,'unit':'nginx.service','path':'/login','ip':self.ip,'web_signals':['path_traversal']},'probe',self.when-1)
+        self.engine.remember(probe)
+        self.assertEqual([event['event_id'] for event in self.engine.web_context_events(lineage,self.when)],['probe'])
+        account=self.engine.normalize('account_created','lab_target',{'account_uid':2000},'account',self.when)
+        identifier=self.engine.create_or_append('web_shell_account','lab_target',account,[*lineage,probe])
+        row=self.store.db.execute('SELECT id,kind,subject,version FROM cases WHERE id=?',(identifier,)).fetchone()
+        with patch.object(self.engine,'lineage',return_value=lineage):evidence=self.engine.snapshot(*row)
+        self.assertFalse(evidence['allowed_actions'])
+        self.assertTrue(any(edge['from']=='probe' and edge['relation']=='nearby_http_time_context_not_causal' for edge in evidence['edges']))
 
 if __name__=='__main__':unittest.main()
