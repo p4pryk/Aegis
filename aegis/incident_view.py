@@ -18,7 +18,7 @@ def timeline(case):
     continuation=evidence.get('continuation')
     if continuation:
         lines.append(('CHAIN '+continuation['root_id']+' / part '+str(continuation['part'])+' / previous '+str(continuation.get('parent_id') or 'none'),'neutral'))
-    if not continuation and len(events)>=(32 if case.get('kind')=='application_activity' else 64 if case.get('kind') in ('host_change','system_activity') else 256):
+    if not continuation and len(events)>=(24 if case.get('kind')=='waf_threshold' else 32 if case.get('kind')=='application_activity' else 64 if case.get('kind') in ('host_change','system_activity') else 256):
         lines.append(('Case event limit reached: this view may omit additional telemetry.','warning'))
     if not events:lines.append(('Evidence snapshot not yet available.','warning'))
     for event in events:
@@ -27,7 +27,7 @@ def timeline(case):
         stamp=datetime.datetime.fromtimestamp(event['event_time'],datetime.timezone.utc).isoformat(timespec='milliseconds')
         label=d.get('path') or d.get('exe') or event['subject']
         lines.append((f"#{numbers[event['event_id']]} {stamp} [{source}] {event['kind']}: {label}",'neutral'))
-        fields=('user','actor','target_user','command','op','acct','grp','id','new_uid','new_gid','old_uid','old_gid','pid','ppid','start_ticks','parent_start_ticks','boot_id','audit_session','session','auid','uid','operation','mechanism','request_id','application','event','outcome','status','trust','web_signals')
+        fields=('user','actor','target_user','command','op','acct','grp','id','new_uid','new_gid','old_uid','old_gid','pid','ppid','start_ticks','parent_start_ticks','boot_id','audit_session','session','auid','uid','operation','mechanism','request_id','application','event','outcome','ip','method','status','trust','web_signals')
         context=' | '.join(k+'='+str(d[k]) for k in fields if d.get(k) is not None and not (k=='session' and event['kind'].startswith('app_')))
         if context:lines.append(('  '+context,'neutral'))
         if event['kind'] in ('identity_change','security_file_change','persistence_change') and not d.get('start_ticks'):

@@ -1,4 +1,4 @@
-import json,pathlib,sys,tempfile,time,unittest
+import contextlib,io,json,pathlib,sys,tempfile,time,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import agent,application_sources,incident_view,presentation
@@ -125,5 +125,93 @@ class JournalTelemetryTests(unittest.TestCase):
         with patch.object(self.engine,'lineage',return_value=lineage):evidence=self.engine.snapshot(*row)
         self.assertFalse(evidence['allowed_actions'])
         self.assertTrue(any(edge['from']=='probe' and edge['relation']=='nearby_http_time_context_not_causal' for edge in evidence['edges']))
+
+    def test_generic_json_journal_http_is_bounded_untrusted_and_review_only(self):
+        data={'event':'http_request','ip':self.ip,'method':'GET','path':'/download?file=..%252fetc%252fpasswd&token=SECRET','status':'200','request_id':self.request_id,'headers':{'authorization':'SECRET'},'body':'SECRET'}
+        raw=self.record('nginx.service',json.dumps(data));raw['PRIORITY']='4'
+        parsed=parse(raw,self.engine.boot_id,self.config)
+        self.assertEqual(parsed['kind'],'http_attack_signature');self.assertEqual(parsed['details']['web_signals'],['path_traversal'])
+        self.assertEqual(parsed['details']['trust'],'producer_reported_not_independently_verified')
+        self.assertNotIn('SECRET',json.dumps(parsed));self.assertNotIn('request_id',parsed['details'])
+        self.engine.journal_context(raw)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone()
+        self.assertIsNotNone(row);self.assertFalse(self.engine.snapshot(*row)['allowed_actions'])
+        self.assertEqual(self.store.db.execute('SELECT kind FROM correlation_events').fetchone()[0],'http_attack_signature')
+        for change in ({'status':True},{'ip':'not-an-ip'},{'ip':True},{'method':'get'},{'path':'https://example.test/'},{'event':'other'}):
+            with self.subTest(change=change):
+                bad=dict(data,**change);event=parse(self.record('nginx.service',json.dumps(bad)),self.engine.boot_id,self.config)
+                self.assertEqual(event['kind'],'service_event')
+        other=parse(self.record('unconfigured.service',json.dumps(data)),self.engine.boot_id,self.config)
+        self.assertIsNone(other)
+
+    def test_caddy_and_nginx_json_access_shapes_ignore_headers_and_queries(self):
+        caddy={'logger':'http.log.access.log0','request':{'client_ip':self.ip,'remote_ip':'192.0.2.1','method':'GET','uri':'/.env?token=SECRET','headers':{'Authorization':['SECRET']}},'status':200}
+        nginx={'remote_addr':self.ip,'request_method':'GET','request_uri':'/search?q=union%20select&token=SECRET','status':'200','body':'SECRET'}
+        for data,kind in ((caddy,'http_attack_signature'),(nginx,'http_sqli_signature')):
+            with self.subTest(kind=kind):
+                event=parse(self.record('nginx.service',json.dumps(data)),self.engine.boot_id,self.config)
+                self.assertEqual(event['kind'],kind);self.assertEqual(event['details']['ip'],self.ip)
+                self.assertEqual(event['details']['trust'],'producer_reported_not_independently_verified')
+                self.assertNotIn('SECRET',json.dumps(event));self.assertNotIn('request_id',event['details'])
+        padded=parse(self.record('nginx.service','  '+json.dumps(nginx)),self.engine.boot_id,self.config)
+        self.assertEqual(padded['kind'],'http_sqli_signature')
+
+    def test_http_case_lookup_is_indexed(self):
+        plan=self.store.db.execute("EXPLAIN QUERY PLAN SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status IN ('collecting','awaiting_analysis') ORDER BY created_at DESC LIMIT 1",('waf_threshold','test',0)).fetchall()
+        self.assertTrue(any('case_subject_lookup' in row[-1] for row in plan))
+
+    def test_http_case_groups_only_nearby_same_service_and_reported_ip(self):
+        def send(unit,ip,path,offset):
+            msg=json.dumps(dict(event='http_request',ip=ip,method='GET',path=path,status=200))
+            self.engine.journal_context(self.record(unit,msg,offset))
+        send('nginx.service',self.ip,'/before',-5)
+        send('nginx.service','198.51.100.25','/other-ip',-4)
+        send('aegis-target.service',self.ip,'/other-service',-3)
+        send('nginx.service',self.ip,'/.env',-2)
+        send('nginx.service',self.ip,'/after',-1)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone();evidence=self.engine.snapshot(*row)
+        self.assertEqual([e['details']['path'] for e in evidence['events']],['/before','/.env','/after'])
+        self.assertFalse(evidence['allowed_actions']);self.assertEqual(len(evidence['edges']),2)
+        self.assertTrue(all(edge['relation']=='same_reported_ip_service_and_nearby_time_not_causal' for edge in evidence['edges']))
+        screen=' '.join(line for line,_ in incident_view.timeline({'id':row[0],'kind':row[1],'status':'collecting','evidence_json':json.dumps(evidence)}))
+        self.assertIn('CONTEXT ONLY',screen);self.assertIn('ip='+self.ip,screen);self.assertIn('method=GET',screen)
+        send('aegis-target.service',self.ip,'/.env',0)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM cases WHERE kind='waf_threshold'").fetchone()[0],2)
+
+    def test_http_context_is_bounded_and_benign_traffic_does_not_open_cases(self):
+        def send(path,n):
+            msg=json.dumps(dict(event='http_request',ip=self.ip,method='GET',path=path,status=200))
+            self.engine.journal_context(self.record('nginx.service',msg,n/100))
+        send('/benign',-1)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM cases WHERE kind='waf_threshold'").fetchone()[0],0)
+        send('/.env',0)
+        for n in range(1,70):send('/normal',n)
+        first=self.store.db.execute("SELECT id FROM cases WHERE kind='waf_threshold'").fetchone()[0]
+        self.assertEqual(len(self.engine.events(first)),24)
+        send('/.git/config',70)
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold' ORDER BY created_at").fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertLessEqual(len(self.engine.events(rows[1][0])),24)
+        self.assertTrue(any(e['details']['path']=='/.git/config' for e in self.engine.events(rows[1][0])))
+        self.assertFalse(self.engine.snapshot(*rows[1])['allowed_actions'])
+
+    def test_http_context_does_not_cross_boot_or_include_old_requests(self):
+        def send(path,offset,boot=None):
+            raw=self.record('nginx.service',json.dumps(dict(event='http_request',ip=self.ip,method='GET',path=path,status=200)),offset)
+            if boot:raw['_BOOT_ID']=boot
+            self.engine.journal_context(raw)
+        send('/old',-61);send('/other-boot',-2,'01234567-89ab-cdef-0123-456789abcdef')
+        send('/.env',0)
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone()
+        self.assertEqual([e['details']['path'] for e in self.engine.snapshot(*row)['events']],['/.env'])
+
+    def test_maximum_http_case_fits_model_snapshot_bound(self):
+        unit='x'*112+'.service';self.config['journal_units'].append(unit)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for n in range(24):
+                data=dict(event='http_request',ip='ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',method='M'*10,path='/'+'😀'*250+('?file=../x' if n==0 else ''),status=200)
+                self.engine.journal_context(self.record(unit,json.dumps(data,ensure_ascii=False),n/100))
+        row=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='waf_threshold'").fetchone();evidence=self.engine.snapshot(*row)
+        self.assertEqual(len(evidence['events']),24);self.assertLess(len(agent.canonical(evidence).encode()),48000)
 
 if __name__=='__main__':unittest.main()

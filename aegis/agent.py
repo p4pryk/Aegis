@@ -233,6 +233,7 @@ class CorrelatedEngine:
         CREATE INDEX IF NOT EXISTS case_parts_root ON case_parts(root_id);
         CREATE TABLE IF NOT EXISTS analysis_queue(case_id TEXT PRIMARY KEY,version INTEGER,queued_at REAL,boot_id TEXT,reason TEXT);
         CREATE TABLE IF NOT EXISTS cases(id TEXT PRIMARY KEY,created_at REAL,updated_at REAL,kind TEXT,subject TEXT,version INTEGER,status TEXT,evidence_json TEXT,analysis_json TEXT,result_json TEXT);
+        CREATE INDEX IF NOT EXISTS case_subject_lookup ON cases(kind,subject,created_at DESC);
         CREATE TABLE IF NOT EXISTS case_events(case_id TEXT,event_id TEXT,event_time REAL,kind TEXT,subject TEXT,details_json TEXT,PRIMARY KEY(case_id,event_id));
         CREATE INDEX IF NOT EXISTS case_event_lookup ON case_events(event_id,case_id);
         CREATE TABLE IF NOT EXISTS case_status_history(case_id TEXT,status TEXT,time REAL,details_json TEXT);
@@ -273,6 +274,8 @@ class CorrelatedEngine:
                 row=None
         if row and kind=='ssh_threshold' and self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(row[0],)).fetchone()[0]>=256 and not self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(row[0],event['event_id'])).fetchone():
             row=None
+        if row and kind=='waf_threshold' and self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(row[0],)).fetchone()[0]>=24 and not self.db.execute('SELECT 1 FROM case_events WHERE case_id=? AND event_id=?',(row[0],event['event_id'])).fetchone():
+            row=None
         if continuation_kind and row:
             identifier=row[0]
             if kind=='application_activity' and self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=(SELECT root_id FROM case_parts WHERE case_id=?) AND e.event_id=?',(identifier,event['event_id'])).fetchone():return identifier
@@ -311,10 +314,11 @@ class CorrelatedEngine:
             extra=[e for e in extra if not self.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE e.event_id=? AND p.root_id=? AND p.case_id!=? LIMIT 1',(e['event_id'],root,identifier)).fetchone()]
         changed=False
         if kind=='ssh_threshold':ordered=[identity_event,event,*extra] if identity_event is not event else [event,*extra]
+        elif kind=='waf_threshold':ordered=[event,*extra]
         else:ordered=[event,*extra] if continuation_kind else [identity_event,*extra,event] if identity_event is not event else [*extra,event]
         for e in ordered:
             count=self.db.execute('SELECT count(*) FROM case_events WHERE case_id=?',(identifier,)).fetchone()[0]
-            if count>=(32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
+            if count>=(24 if kind=='waf_threshold' else 32 if kind=='application_activity' else 64 if kind in ('host_change','system_activity') else 256):break
             cur=self.db.execute('INSERT OR IGNORE INTO case_events VALUES (?,?,?,?,?,?)',(identifier,e['event_id'],e['event_time'],e['kind'],e['subject'],canonical(e['details'])));changed|=bool(cur.rowcount)
         if changed:
             from response import archive
@@ -482,11 +486,13 @@ class CorrelatedEngine:
         if (raw.get('SYSLOG_IDENTIFIER') or raw.get('_COMM')) in ('sshd','sshd-session'):return
         counts=getattr(self,'system_log_counts',{'read':0,'parsed':0,'unrecognized':0});self.system_log_counts=counts;counts['read']+=1
         system=journal(raw) if self.c.get('system_logs_enabled',True) and (raw.get('SYSLOG_IDENTIFIER') or raw.get('_COMM')) not in ('sudo','su','su-l') else None
+        candidate=parse(raw,self.boot_id,self.c) if system and system['kind']=='system_warning' else None
+        if candidate and candidate['kind'] in ('http_request','http_sqli_signature','http_attack_signature'):system=None
         if system:
             counts['parsed']+=1
             ingest(self,system)
             return
-        event=parse(raw,self.boot_id,self.c)
+        event=candidate or parse(raw,self.boot_id,self.c)
         if not event:
             extra=journal(raw) if self.c.get('system_logs_enabled',True) else None
             if extra:
@@ -502,7 +508,20 @@ class CorrelatedEngine:
         if not self.remember(event):return
         self.store.observe('journald',event['kind'],event['subject'],description,event['event_id'],event['event_time'])
         if event['details']['boot_id']!=self.boot_id:return
-        if event['kind'] in ('http_sqli_signature','http_attack_signature'):self.create_or_append('waf_threshold',event['subject'],event)
+        if event['kind'] in ('http_request','http_sqli_signature','http_attack_signature'):self.http_activity(event)
+    def http_activity(self,event):
+        d=event['details'];unit=d.get('unit');ip=d.get('ip')
+        if not unit or not ip:return
+        subject=self.boot_id+'|'+unit+'|'+ip;stamp=event['event_time']
+        if event['kind'] in ('http_sqli_signature','http_attack_signature'):
+            rows=self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind IN ('http_request','http_sqli_signature','http_attack_signature') AND subject=? AND event_time BETWEEN ? AND ? AND json_extract(details_json,'$.boot_id')=? AND json_extract(details_json,'$.unit')=? ORDER BY event_time DESC LIMIT 13",(ip,stamp-60,stamp,self.boot_id,unit)).fetchall()
+            nearby=[self.normalize(r[2],r[3],json.loads(r[4]),r[0],r[1]) for r in rows if r[0]!=event['event_id']][:12]
+            self.create_or_append('waf_threshold',subject,event,nearby)
+            return
+        row=self.db.execute("SELECT id FROM cases WHERE kind='waf_threshold' AND subject=? AND created_at>? AND status IN ('collecting','awaiting_analysis') ORDER BY created_at DESC LIMIT 1",(subject,time.time()-120)).fetchone()
+        if not row:return
+        last,count=self.db.execute("SELECT max(CASE WHEN kind IN ('http_sqli_signature','http_attack_signature') THEN event_time END),count(*) FROM case_events WHERE case_id=?",(row[0],)).fetchone()
+        if count<24 and last is not None and abs(stamp-last)<=60:self.create_or_append('waf_threshold',subject,event,case_id=row[0])
     def enrich_ssh_accounts(self):
         for r in self.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='account_created' AND event_time>?",(time.time()-60,)).fetchall():
             self.correlate_ssh_account(dict(event_id=r[0],event_time=r[1],kind=r[2],subject=r[3],details=json.loads(r[4])))
@@ -646,6 +665,14 @@ class CorrelatedEngine:
             # IP response requires a trusted session->behavior link, not implemented
             # by these aggregate collectors. Keep evidence, offer no IP action.
             pass
+        elif kind=='waf_threshold':
+            anchor=next((e for e in events if e['kind'] in ('http_sqli_signature','http_attack_signature')),None)
+            if anchor:
+                for e in events:
+                    if e['event_id']==anchor['event_id'] or abs(e['event_time']-anchor['event_time'])>60:continue
+                    if any(e['details'].get(k)!=anchor['details'].get(k) for k in ('boot_id','unit','ip')):continue
+                    before,after=(e,anchor) if e['event_time']<=anchor['event_time'] else (anchor,e)
+                    edges.append({'from':before['event_id'],'to':after['event_id'],'relation':'same_reported_ip_service_and_nearby_time_not_causal'})
         elif kind=='ssh_session_account':
             account=next((e for e in reversed(events) if e['kind']=='account_created'),None)
             chain=self.session_chain(account) if account else []

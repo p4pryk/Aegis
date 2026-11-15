@@ -153,6 +153,30 @@ def parse(record, boot_id, config):
                     description = 'HTTP request recorded with its application request ID.'
                 except (KeyError, TypeError, ValueError):
                     return None
+        # Recognize selected JSON access shapes only from configured units.
+        # Every value is a producer claim, including the IP.
+        if kind is None and msg.lstrip().startswith('{'):
+            try:
+                structured=json.loads(msg)
+                if not isinstance(structured,dict):raise ValueError('Not an HTTP record')
+                if structured.get('event')=='http_request':
+                    ip,method,target=(structured[k] for k in ('ip','method','path'))
+                elif isinstance(structured.get('request'),dict) and isinstance(structured.get('logger'),str) and structured['logger'].startswith('http.log.access'):
+                    request=structured['request'];ip=request.get('client_ip') or request['remote_ip'];method=request['method'];target=request['uri']
+                else:ip,method,target=(structured[k] for k in ('remote_addr','request_method','request_uri'))
+                if not isinstance(ip,str):raise ValueError('Invalid IP')
+                ip=str(ipaddress.ip_address(ip));status=structured['status']
+                if not isinstance(method,str) or not re.fullmatch(r'[A-Z]{3,10}',method):raise ValueError('Invalid method')
+                if not isinstance(target,str) or not target.startswith('/') or len(target)>4096 or any(ord(c)<32 for c in target):raise ValueError('Invalid target')
+                if isinstance(status,str) and re.fullmatch(r'[1-5][0-9]{2}',status):status=int(status)
+                if type(status) is not int or not 100<=status<=599:raise ValueError('Invalid status')
+                details.update(ip=ip,method=method,path=target.split('?',1)[0].split('#',1)[0][:256],status=status,trust='producer_reported_not_independently_verified')
+                signals=web_request_signals(target)
+                if signals:details['web_signals']=signals
+                kind='http_sqli_signature' if sqli_signature(target) else 'http_attack_signature' if signals else 'http_request'
+                description='Application-reported HTTP request; outcome and source identity are unverified.'
+                subject=ip
+            except (KeyError,ValueError,TypeError,RecursionError):pass
         if kind is None:
             access = ACCESS.match(msg)
         if access:
