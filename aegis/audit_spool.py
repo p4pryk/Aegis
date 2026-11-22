@@ -1,4 +1,5 @@
 """Root-private, bounded audit inbox; acknowledgment follows the core transaction."""
+import copy
 import json
 import os
 import pathlib
@@ -79,22 +80,41 @@ def consume(engine, spool):
     cursor = saved.get('id', 0) if saved.get('identity') == spool.identity else 0
     rows = spool.batch(cursor)
     if rows:
-        with engine.store.atomic():
-            for identifier, received, boot, line, snapshots in rows:
-                if boot == engine.boot_id:
-                    engine.audit_snapshots = json.loads(snapshots)
-                    try:
-                        engine.account(line)
-                    except (ValueError, KeyError, TypeError) as exc:
-                        engine.store.state('audit_parse_error', {'time': time.time(), 'error': type(exc).__name__})
-                    finally:
-                        engine.audit_snapshots = None
-                else:
-                    old = engine.store.state('audit_previous_boot_skipped') or 0
-                    engine.store.state('audit_previous_boot_skipped', old+1)
-            cursor = rows[-1][0]
-            engine.store.state('audit_assembly', getattr(engine, 'persistence_pending', {}))
-            engine.store.state('audit_spool_cursor', {'identity': spool.identity, 'id': cursor})
+        batch_checkpoint=copy.deepcopy(getattr(engine,'persistence_pending',{}))
+        try:
+            with engine.store.atomic():
+                for identifier, received, boot, line, snapshots in rows:
+                    if boot == engine.boot_id:
+                        # Only the current assembly group is mutated; a shallow map
+                        # preserves expired groups and a deep copy preserves this one.
+                        checkpoint = dict(getattr(engine,'persistence_pending',{}))
+                        match = re.match(r'^(?:node=\S+ )?type=\w+\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):',line)
+                        if match:
+                            key=engine.boot_id+':'+match[1]+':'+match[2]
+                            if key in checkpoint:checkpoint[key]=copy.deepcopy(checkpoint[key])
+                        engine.db.execute('SAVEPOINT audit_record')
+                        try:
+                            engine.audit_snapshots = json.loads(snapshots)
+                            engine.account(line)
+                        except (ValueError, KeyError, TypeError) as exc:
+                            engine.db.execute('ROLLBACK TO audit_record')
+                            engine.persistence_pending=checkpoint
+                            prior=engine.store.state('audit_parse_error') or {}
+                            engine.store.state('audit_parse_error', {'time':time.time(),'error':type(exc).__name__,'count':prior.get('count',1 if prior else 0)+1,'last_record_id':identifier})
+                            engine.db.execute('RELEASE audit_record')
+                        else:
+                            engine.db.execute('RELEASE audit_record')
+                        finally:
+                            engine.audit_snapshots = None
+                    else:
+                        old = engine.store.state('audit_previous_boot_skipped') or 0
+                        engine.store.state('audit_previous_boot_skipped', old+1)
+                cursor = rows[-1][0]
+                engine.store.state('audit_assembly', getattr(engine, 'persistence_pending', {}))
+                engine.store.state('audit_spool_cursor', {'identity': spool.identity, 'id': cursor})
+        except BaseException:
+            engine.persistence_pending=batch_checkpoint
+            raise
     spool.acknowledge(cursor)  # Crash before this deletion is harmless: the durable cursor skips replays.
     return len(rows)
 

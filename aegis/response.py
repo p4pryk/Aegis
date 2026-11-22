@@ -1,6 +1,9 @@
 """Durable, bounded response attempts. Only a freshly checked local plan is enrolled."""
 import hashlib
 import json
+import pathlib
+import re
+import sqlite3
 import time
 
 
@@ -10,6 +13,66 @@ def encode(value):
 
 def policy_hash(config):
     return hashlib.sha256(encode(config).encode()).hexdigest()
+
+
+def authorize_step(config, envelope):
+    """Resolve a committed intent at the privileged boundary; never accept caller actions."""
+    from policy import require_enforce
+    from agent import CorrelatedEngine, safe_ip
+    require_enforce(config)
+    if not isinstance(envelope,dict) or set(envelope)!={'case_id','position','version'}:
+        raise ValueError('A committed case step is required')
+    identifier,position,version=envelope['case_id'],envelope['position'],envelope['version']
+    if not isinstance(identifier,str) or not re.fullmatch(r'[a-f0-9]{24}',identifier) or type(position) is not int or position<0 or type(version) is not int or version<1:
+        raise ValueError('Invalid case step')
+    path=pathlib.Path(config['data_dir'])/'incidents.db'
+    db=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=3)
+    try:
+        db.execute('BEGIN')
+        row=db.execute('''SELECT c.version,c.status,c.kind,c.evidence_json,r.boot_id,r.policy_hash,r.deadline,
+                                 s.action_json,s.request_json,s.status,c.subject,c.analysis_json
+                          FROM cases c JOIN response_runs r ON r.case_id=c.id
+                          JOIN response_steps s ON s.case_id=c.id
+                          WHERE c.id=? AND s.position=?''',(identifier,position)).fetchone()
+        if not row:raise ValueError('Unknown case step')
+        current_boot=pathlib.Path('/proc/sys/kernel/random/boot_id')
+        boot=current_boot.read_text().strip() if current_boot.exists() else 'test-boot'
+        if row[0]!=version or row[1]!='recognized' or row[4]!=boot or row[5]!=policy_hash(config) or time.time()>row[6] or row[9]!='running':
+            raise ValueError('Case step expired or authorization changed')
+        evidence=json.loads(row[3]);action=json.loads(row[7]);request=json.loads(row[8])
+        if evidence.get('version')!=version or position>=len(evidence.get('allowed_actions',[])) or evidence['allowed_actions'][position]!=action:
+            raise ValueError('Action differs from recorded evidence')
+        assessment=json.loads(row[11]);confidence=assessment.get('confidence')
+        references=assessment.get('evidence_ids')
+        if (assessment.get('attack') is not True or type(confidence) not in (int,float) or
+            not evidence.get('policy',{}).get('minimum_confidence',.85)<=confidence<=1 or
+            assessment.get('proposed_actions')!=evidence['allowed_actions'] or not isinstance(references,list) or
+            not set(evidence.get('required_evidence_ids',[])).issubset(references)):
+            raise ValueError('Assessment does not authorize this response')
+        if not isinstance(request,dict) or any(request.get(k)!=v for k,v in action.items()):
+            raise ValueError('Request differs from authorized action')
+        extra=set(request)-set(action)
+        permitted={'quarantine_account':{'expected_uid'},'block_ip':{'expires_at'}}.get(action.get('action'),set())
+        if extra!=permitted:raise ValueError('Invalid action fields')
+        if action.get('action')=='quarantine_account':
+            account=next((e for e in evidence.get('events',[]) if e.get('kind')=='account_created' and e.get('subject')==action.get('user')),None)
+            if not account or request.get('expected_uid')!=account.get('details',{}).get('account_uid'):
+                raise ValueError('Account identity differs from evidence')
+        if position==0:
+            # Recompute the local chain at the privileged boundary before any effect.
+            checker=object.__new__(CorrelatedEngine);checker.c=config;checker.db=db;checker.boot_id=boot
+            fresh=checker.snapshot(identifier,row[2],row[10],version)
+            if fresh['allowed_actions']!=evidence.get('allowed_actions') or fresh['required_evidence_ids']!=evidence.get('required_evidence_ids'):
+                raise ValueError('Current evidence no longer supports this response')
+        previous=[r[0] for r in db.execute('SELECT status FROM response_steps WHERE case_id=? AND position<? ORDER BY position',(identifier,position))]
+        if len(previous)!=position or (action.get('action')=='block_ip' and any(s!='executed' for s in previous)):
+            raise ValueError('Prior containment not verified')
+        if action.get('action')=='block_ip':
+            scope='ssh_dedicated_source_ips' if row[2]=='ssh_session_account' else 'app_dedicated_source_ips' if row[2] in ('app_sql_account','app_sql_persistence') else None
+            if not scope or request.get('ip') not in config.get(scope,[]) or not safe_ip(request.get('ip'),config):
+                raise ValueError('IP is outside dedicated response scope')
+        return request
+    finally:db.close()
 
 
 def initialize(db):
@@ -121,7 +184,10 @@ def advance(engine, identifier, now=None, stop=None):
         publish(engine, identifier)  # Durable intent BEFORE the external side effect.
         started = time.monotonic()
         try:
-            out = engine.execute(json.loads(request))
+            if hasattr(engine,'execute_step'):
+                version=engine.db.execute('SELECT version FROM cases WHERE id=?',(identifier,)).fetchone()[0]
+                out=engine.execute_step(identifier,position,version)
+            else:out = engine.execute(json.loads(request))
             if not isinstance(out, dict) or out.get('verified') is not True:
                 raise RuntimeError('Executor did not verify action')
             out.update(executed_at=time.time(), execution_ms=round((time.monotonic()-started)*1000, 3))
@@ -168,6 +234,7 @@ def main():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         store=Store(config)
         engine=CorrelatedEngine(config,store,lambda request:request_executor(engine.c,request))
+        engine.execute_step=lambda identifier,position,version:request_executor(engine.c,{'case_id':identifier,'position':position,'version':version})
         last_maintenance=0
         try:
             while not stop.is_set():

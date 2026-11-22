@@ -174,6 +174,12 @@ class AtomicConnection(sqlite3.Connection):
     def commit(self):
         if not self.deferred:super().commit()
 
+def sqlite_error_note(error):
+    """Expose SQLite's non-sensitive extended result without logging SQL or evidence."""
+    name=getattr(error,'sqlite_errorname',None);code=getattr(error,'sqlite_errorcode',None)
+    if isinstance(name,str) and re.fullmatch(r'SQLITE_[A-Z0-9_]+',name) and type(code) is int:
+        error.add_note(f'AEGIS SQLite extended result: {name} ({code})')
+
 class Store:
     def __init__(self,c):
         self.path=pathlib.Path(c['data_dir'])/'incidents.db'
@@ -194,12 +200,18 @@ class Store:
         self.db.deferred=True
         try:
             yield
-        except BaseException:
-            self.db.rollback()
+            self.db.deferred=False
+            self.db.commit()
+        except BaseException as error:
+            if isinstance(error,sqlite3.Error):sqlite_error_note(error)
+            try:self.db.rollback()
+            except sqlite3.Error as rollback_error:
+                name=getattr(rollback_error,'sqlite_errorname',None);code=getattr(rollback_error,'sqlite_errorcode',None)
+                detail=f'{name} ({code})' if isinstance(name,str) and re.fullmatch(r'SQLITE_[A-Z0-9_]+',name) and type(code) is int else 'unknown SQLite error'
+                error.add_note('AEGIS transaction rollback also failed: '+detail+'; restart and inspect the database')
             raise
         finally:
             self.db.deferred=False
-        self.db.commit()
     def state(self,key,value=None):
         if value is None:
             row=self.db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone(); return json.loads(row[0]) if row else None
@@ -261,9 +273,9 @@ class CorrelatedEngine:
     def create_or_append(self,kind,subject,event,extra=(),case_id=None):
         now=time.time()
         context_seconds=max(120,min(3600,int(self.c.get('incident_context_seconds',3600)))) if kind in ('application_activity','host_change','system_activity') else 120
-        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error','superseded') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-context_seconds)).fetchone()
+        row=self.db.execute("SELECT id FROM cases WHERE kind=? AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error','superseded','review_closed') ORDER BY created_at DESC LIMIT 1",(kind,subject,now-context_seconds)).fetchone()
         if case_id:
-            row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded')",(case_id,kind,subject)).fetchone()
+            row=self.db.execute("SELECT id FROM cases WHERE id=? AND kind=? AND subject=? AND status NOT IN ('defended','recognized','defense_error','superseded','review_closed')",(case_id,kind,subject)).fetchone()
             if not row:return None
         parent=None;identity_event=event
         continuation_kind=kind in ('application_activity','host_change','system_activity')
@@ -460,7 +472,7 @@ class CorrelatedEngine:
                 result.append(self.normalize(r[2],r[3],details,r[0],r[1]))
         return result
     def enrich_app_cases(self):
-        rows=self.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('app_sql_login','app_sql_account','app_sql_persistence') AND status NOT IN ('defended','recognized','superseded','defense_error') AND created_at>?",(time.time()-600,)).fetchall()
+        rows=self.db.execute("SELECT id,kind,subject FROM cases WHERE kind IN ('app_sql_login','app_sql_account','app_sql_persistence') AND status NOT IN ('defended','recognized','superseded','defense_error','review_closed') AND created_at>?",(time.time()-600,)).fetchall()
         for identifier,kind,subject in rows:
             for source in self.events(identifier):
                 if source['kind'] not in ('app_login','app_account_job','app_persistence_job'):continue
@@ -638,14 +650,14 @@ class CorrelatedEngine:
             current=parent
         return []
     def enrich_accounts(self,event):
-        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error') AND created_at>?",(time.time()-60,)).fetchall()
+        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error','review_closed') AND created_at>?",(time.time()-60,)).fetchall()
         for row in rows:
             for account in self.events(row[0]):
                 if account['kind']=='account_created':
                     lineage=self.lineage(account)
                     if lineage:self.create_or_append('web_shell_account',account['subject'],account,[*lineage,*self.web_context_events(lineage,account['event_time'])])
     def enrich_web_accounts(self):
-        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error') AND created_at>?",(time.time()-60,)).fetchall()
+        rows=self.db.execute("SELECT id FROM cases WHERE kind='web_shell_account' AND status NOT IN ('defended','recognized','defense_error','review_closed') AND created_at>?",(time.time()-60,)).fetchall()
         for row in rows:
             for account in self.events(row[0]):
                 if account['kind']=='account_created':
@@ -853,9 +865,10 @@ def receive(s):
 
 def serve_executor(c):
     from rollback import Journal
+    from response import authorize_step
     journal=Journal(c)
     for receipt in journal.entries():journal.publish(receipt)
-    executor=Executor(c);executor.firewall_init();s=credential_socket(c['executor_socket'],socket.SOCK_SEQPACKET);s.listen(8)
+    executor=Executor(c);s=credential_socket(c['executor_socket'],socket.SOCK_SEQPACKET);s.listen(8)
     while True:
         client,_=s.accept()
         with client:
@@ -864,7 +877,9 @@ def serve_executor(c):
                 executor.c=load_config(c.get('_config_path','/etc/defense-agent/config.json'))
                 journal.config=executor.c
                 require_enforce(executor.c)
-                result=journal.record(executor,json.loads(receive(client)));reply={'ok':True,'result':result}
+                request=authorize_step(executor.c,json.loads(receive(client)))
+                if request['action']=='block_ip':executor.firewall_init()
+                result=journal.record(executor,request);reply={'ok':True,'result':result}
             except Exception as e:reply={'ok':False,'error':str(e)[:500]}
             try:client.send(json.dumps(reply).encode())
             except OSError:pass  # The caller may restart after the action already completed.

@@ -1,4 +1,5 @@
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,7 +16,7 @@ class Lifecycle(unittest.TestCase):
     def test_backup_restores_managed_files_and_refuses_operator_conflict(self):
         with tempfile.TemporaryDirectory() as root:
             root=pathlib.Path(root);managed=root/'managed';managed.mkdir();(managed/'code.py').write_text('old')
-            with patch.object(lifecycle,'ROOT',root/'backups'),patch.object(lifecycle,'managed',return_value=[managed]),patch.object(lifecycle,'UNITS',()),patch.object(lifecycle,'run'),patch.object(lifecycle.os,'chown'):
+            with patch.object(lifecycle,'ROOT',root/'backups'),patch.object(lifecycle,'managed',return_value=[managed]),patch.object(lifecycle,'UNITS',()),patch.object(lifecycle,'run',return_value=subprocess.CompletedProcess([],0,stdout='disabled',stderr='')),patch.object(lifecycle.os,'chown'):
                 backup=lifecycle.backup(root);(managed/'code.py').write_text('new');lifecycle.seal(backup)
                 (managed/'code.py').write_text('operator edit')
                 with self.assertRaisesRegex(ValueError,'changed'):lifecycle.restore(backup)
@@ -36,7 +37,7 @@ class Lifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root=pathlib.Path(root);managed=root/'managed';managed.mkdir();child=managed/'nested';child.mkdir();child.chmod(0o755)
             (managed/'code.py').write_text('old');original_mode=child.stat().st_mode&0o777
-            with patch.object(lifecycle,'ROOT',root/'backups'),patch.object(lifecycle,'managed',return_value=[managed]),patch.object(lifecycle,'UNITS',()),patch.object(lifecycle,'run'),patch.object(lifecycle.os,'chown'):
+            with patch.object(lifecycle,'ROOT',root/'backups'),patch.object(lifecycle,'managed',return_value=[managed]),patch.object(lifecycle,'UNITS',()),patch.object(lifecycle,'run',return_value=subprocess.CompletedProcess([],0,stdout='disabled',stderr='')),patch.object(lifecycle.os,'chown'):
                 backup=lifecycle.backup(root);(managed/'code.py').write_text('new');lifecycle.seal(backup)
                 child.chmod(0o700)
                 with self.assertRaisesRegex(ValueError,'changed'):lifecycle.restore(backup)
@@ -49,3 +50,13 @@ class Lifecycle(unittest.TestCase):
                 self.assertEqual((managed/'code.py').read_text(),'old')
                 manifest=json.loads((old/'manifest.json').read_text());manifest['fingerprint_version']=99;(old/'manifest.json').write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(ValueError,'Unknown release fingerprint version'):lifecycle.restore(old)
+
+    def test_reload_skips_inactive_ssh_and_checks_reload_failures(self):
+        def command(*args):
+            code=1 if args[:3]==('systemctl','is-active','ssh') else 0
+            return subprocess.CompletedProcess(args,code,stdout='',stderr='')
+        with patch.object(lifecycle,'run',side_effect=command) as run,patch.object(lifecycle.shutil,'which',return_value=None):
+            lifecycle.reload_host(True,False)
+            self.assertFalse(any(call.args[:2]==('/usr/sbin/sshd','-t') for call in run.call_args_list))
+        with patch.object(lifecycle,'run',return_value=subprocess.CompletedProcess([],1,stdout='',stderr='')),patch.object(lifecycle.shutil,'which',return_value='/sbin/augenrules'):
+            with self.assertRaisesRegex(RuntimeError,'augenrules'):lifecycle.reload_host(False,True)

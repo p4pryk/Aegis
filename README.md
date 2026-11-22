@@ -166,6 +166,23 @@ The response worker also runs bounded maintenance approximately once per minute:
 
 Restart the core, response worker and auditd after changing collection/storage limits. Each maintenance pass removes at most 100 completed cases and 500 obsolete model files. Active cases and their current model results are protected. Database pages are reclaimed incrementally; the installer converts older databases once while services are stopped. Application-log reading, writing and truncation share a file lock. If unread data or active evidence prevents cleanup, the terminal reports pressure instead of deleting it. SQLite rollback journals can temporarily require additional disk space. Quarantine backups, the training application's own database and system journals are outside this retention policy.
 
+Cases in `review_required`, `analysis_error` and `defense_error` are also retained under pressure until an operator explicitly completes the review. This can fill the database: monitor the storage-pressure indicator, export evidence as needed, and investigate promptly. Once reviewed, close a specific unchanged version using the version shown in its case details:
+
+```bash
+sudo python3 /opt/defense-agent/maintenance.py CASE_ID --resolve-review --version VERSION --reason "Investigation completed"
+```
+
+Closing a review records the reason and process UID (normally root under `sudo`), plus the numeric `SUDO_UID` environment value when present; the latter is an operator-supplied hint, not independently verified identity. It does not execute or reverse a response. A pending or running response prevents closure. Closed cases are subject to normal retention.
+
+Audit records that cannot be parsed are rolled back individually and reported as a persistent source `GAP`; subsequent records continue. Investigate the affected interval because the rejected record cannot be recovered from the inbox. Once the cause has been investigated, root can record an explicit review using the **current total** displayed in Source Health:
+
+```bash
+sudo python3 /opt/defense-agent/maintenance.py --ack-audit-parse COUNT --reason "Investigated missing audit records"
+sudo python3 /opt/defense-agent/maintenance.py --audit-gap-history
+```
+
+Acknowledgement records the reason, count, process UID and optional unverified `SUDO_UID` hint locally. It does not recover records or clear other loss indicators. The source view retains the historical count; a new parsing error returns the source to `GAP`. If the count changes while the operator is reviewing it, the command refuses the stale acknowledgement. The continuity report also compares the counter across samples so an error acknowledged between samples still fails that run. Use ordinary operational notes in the reason; the history is stored in the local incident database and the history command shows its latest 100 entries.
+
 Export a retained incident **before** its retention period expires:
 
 ```bash
@@ -208,6 +225,8 @@ System and host-change batches now continue after 64 records with a new part at 
 ### Install, update and recover
 
 Run `sudo bash aegis/install.sh` for the ordinary agent, or `--demo` only on an isolated training VM. Model configuration is optional for installation: without `ai.json`, collection continues but model assessment and new automatic containment are unavailable. The vulnerable application is not installed in the ordinary profile.
+
+The installer leaves SSH configuration unchanged. If the host does not emit the required authentication details, an administrator must configure its logging separately and verify coverage. An empty AEGIS nftables table is created only for an authorized IP-block action, not just by starting the executor in Observe mode. Existing tables from older releases are left in place. The collector and response service use private temporary directories; configure application log sources in a durable host location such as `/var/log`, not the host's `/tmp` or `/var/tmp`.
 
 The installer checks platform/configuration/free space, snapshots managed code/configuration/unit files under root-private `/var/lib/defense-agent-releases/`, and attempts restoration if installation fails. Incident databases and response receipts are never reverted. Save the printed release-backup path. To roll back a completed deployment:
 
@@ -381,6 +400,8 @@ Run `sudo python3 aegis/live-rollback-tests.py` only on the isolated VM after in
 python3 -m unittest discover -s aegis/tests -q
 ```
 
+On the isolated training VM, `sudo python3 aegis/live-sqlite-temp-tests.py` reproduces a SQLite temporary-file failure under the previous service restrictions and checks the corrected configuration, using a separate disposable database. `sudo python3 aegis/live-executor-boundary-tests.py` uses synthetic incident evidence to exercise the real executor, temporary accounts, network blocking and rollback. `sudo python3 aegis/live-audit-gap-tests.py` checks source-health review and continuity against a disposable database; `sudo python3 aegis/live-core-batch-tests.py` runs a temporary systemd collector through 1,000 spooled records and a restart. These tests do not call the model.
+
 The unit suite covers correlation, response safety, collector health and model scheduling. `aegis/live-queue-tests.py` checks the installed read-only viewer against the live database and a separate temporary 55-case fixture, including a bounded subprocess test for FIFO result rejection; it never inserts fixture cases into the live database. The `aegis/live-app-tests.py`, `aegis/live-persistence-tests.py`, `aegis/live-session-tests.py` and `aegis/live-firewall-tests.py` scripts exercise the real VM, kernel audit and response path. `aegis/live-recovery-tests.py` additionally crashes a fixture response after real account/file side effects, verifies recovery from missing results, and checks journal replay across reader downtime. Its fixture plan tests recovery independently of model classification. `aegis/live-operations-tests.py` tests real audit collection during core downtime, a real process burst, and continued ingestion while a separate fixture response is delayed. `aegis/live-telemetry-tests.py` opens real SSH sessions, performs an inert group/file-change sequence and checks session isolation, terminal explanations and restart retention. `aegis/live-prompt-tests.py` uses the real model against baseline and adversarial evidence with a recording executor, so it does not perform defensive side effects. Stop `defense-agent-ai` for that script and restart it afterwards; it reserves calls against the existing hourly budget and spacing without resetting counters. Run those scripts as root, one at a time, **only on the isolated training VM**. Leave at least 11 seconds between suites that repeatedly restart the core; the default systemd limit is five starts in ten seconds. If diagnostics confirm `start-limit-hit`, clear that failed state and restore the service before retrying; do not weaken the service limit. They create temporary users, files and network namespaces and clean up their active changes; the incident history remains available.
 
 The console polls its read-only database every second. Case assessment waits for a two-second quiet period. Model starts remain at least eight seconds apart with a default budget of 40 attempted calls per UTC clock hour, including failed attempts. Ten calls are reserved for cases with a locally verified action catalog: ordinary analyses stop at 30, while eligible response chains may use the full 40. Configure `max_calls_per_hour`, `response_reserve_calls` and `min_call_interval_seconds` in `ai.json`; existing explicit caps are preserved, and an omitted reserve defaults to the smaller of ten or one quarter of the cap. Counters and retry state survive worker restarts; hourly reset preserves call spacing and provider cooldown. A provider throttle pauses all cases and honors `Retry-After`.
@@ -441,6 +462,20 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-22 — Review audit parsing gaps
+
+- Add a root-only, count-checked review for audit parsing gaps, with local history and visible historical counts. A later gap reopens the warning, and reviewing a parse gap never clears other loss indicators or recovers lost records.
+- Make the continuity report check the current parse-gap state and compare its counter between samples, including gaps reviewed between samples. Record the optional, unverified `SUDO_UID` hint on incident and audit-gap reviews.
+- Validation: all 371 tests passed on the Azure Linux VM; 371 local tests completed with 9 Linux/root-only skips. Fourteen isolated audit-gap checks covered stale acknowledgements, retained history, renewed warnings and continuity sampling. A temporary systemd collector processed 1,000 queued records and restarted without duplicates. The SQLite temporary-file regression and real account/network-block/rollback checks also passed; the incident assessment was synthetic and no model call was made.
+
+### 2026-11-22 — Harden evidence, review and execution safety
+
+- Report audit parsing failures as a persistent source gap and roll back partial evidence from the affected record while continuing with subsequent records.
+- Preserve cases requiring review even during storage pressure; add an explicit version-checked, locally recorded review closure without triggering a response or rollback.
+- Require the privileged executor to resolve a committed case step, check its version, host boot, policy, deadline and evidence, recompute the chain before the first action, and independently enforce dedicated-IP scope and previous response verification. Starting in Observe mode no longer creates a firewall table.
+- Leave SSH configuration untouched during installation and report errors while restoring host services and audit configuration. Give the collector and response service private writable temporary directories; report SQLite's extended result without logging evidence and preserve the original error when a transaction commit or rollback fails. Remove the instruction that encouraged the model to inflate confidence to reach the action threshold; confidence remains uncalibrated and the existing conservative threshold is unchanged.
+- Validation: 362 tests passed on the Azure VM, and 362 local tests completed with 8 Linux/root-only skips. A controlled SQLite workload reproduced `SQLITE_IOERR_GETTEMPPATH` under the prior service restrictions and completed all 6,000 inserts with private temporary storage; the earlier error's exact extended code was not recorded, so the original cause is not proven. An isolated synthetic chain exercised the real executor, account quarantine, network block and rollback. A 50-second collector check showed the pending audit queue decreasing from 95 to 17 with no new rejected records. Nine live lifecycle checks passed, covering update, rollback, uninstall and installation without a model. Model output was simulated; this is not an evaluation of model accuracy, and sustained stability remains unproven.
 
 ### 2026-11-22 — Bound authentication evidence links
 

@@ -18,6 +18,19 @@ FILES=('/etc/audit/plugins.d/defense-agent.conf','/etc/audit/rules.d/aegis-exec.
 def run(*args):
     return subprocess.run(args,capture_output=True,text=True,timeout=120)
 
+def checked(*args):
+    result=run(*args)
+    if result.returncode:
+        raise RuntimeError('Restore incomplete: '+' '.join(args)+' failed; inspect the host')
+    return result
+
+def reload_host(ssh_changed, audit_active):
+    if shutil.which('augenrules'):checked('augenrules','--load')
+    if audit_active:checked('service','auditd','restart')
+    if ssh_changed and run('systemctl','is-active','ssh').returncode==0:
+        checked('/usr/sbin/sshd','-t')
+        checked('systemctl','reload','ssh')
+
 def preflight():
     for source in pathlib.Path(__file__).parent.glob('*.py'):ast.parse(source.read_text(),filename=str(source))
     if platform.system()!='Linux':raise ValueError('Linux is required')
@@ -95,6 +108,9 @@ def seal(directory):
 
 def restore(directory,failed=False):
     manifest=load(directory)
+    ssh_path=pathlib.Path('/etc/ssh/sshd_config.d/60-aegis-observability.conf')
+    ssh_before=fingerprint(ssh_path)
+    audit_active=run('systemctl','is-active','auditd').returncode==0
     if not failed:
         if 'installed' not in manifest:raise ValueError('Incomplete deployment; use recover after inspecting installation failure')
         for path,expected in manifest['installed'].items():
@@ -113,17 +129,19 @@ def restore(directory,failed=False):
             else:shutil.copy2(saved,path)
             os.chown(path,entry['uid'],entry['gid']);os.chmod(path,entry['mode'])
             for relative,owners in entry['owners'].items():os.chown(path/relative,*owners)
-    run('systemctl','daemon-reload')
+    checked('systemctl','daemon-reload')
     for unit,state in manifest['services'].items():
-        run('systemctl','enable' if state['enabled'] else 'disable',unit)
-        if state['active'] and run('systemctl','start',unit).returncode:raise RuntimeError('Service restore failed: '+unit)
+        enabled=run('systemctl','is-enabled',unit).stdout.strip()=='enabled'
+        if enabled!=state['enabled']:checked('systemctl','enable' if state['enabled'] else 'disable',unit)
+        if state['active']:checked('systemctl','start',unit)
     # Do not flush host audit policy. Removing loaded audit rules may require a reboot.
-    if shutil.which('augenrules'):run('augenrules','--load')
-    run('service','auditd','restart')
-    if run('/usr/sbin/sshd','-t').returncode==0:run('systemctl','reload','ssh')
+    reload_host(ssh_before!=fingerprint(ssh_path),audit_active)
 
 def uninstall(directory):
     manifest=load(directory)
+    ssh_path=pathlib.Path('/etc/ssh/sshd_config.d/60-aegis-observability.conf')
+    ssh_before=fingerprint(ssh_path)
+    audit_active=run('systemctl','is-active','auditd').returncode==0
     installed=manifest.get('installed')
     if not installed:raise ValueError('A sealed release backup is required')
     paths=[pathlib.Path(e['path']) for e in manifest['files'] if e['path']!='/etc/defense-agent']
@@ -131,13 +149,12 @@ def uninstall(directory):
         if fingerprint(path,**fingerprint_options(manifest))!=installed[str(path)]:raise ValueError('Managed files changed; inspect before uninstalling')
     for unit in UNITS:
         if run('systemctl','is-active',unit).returncode==0 and run('systemctl','stop',unit).returncode:raise RuntimeError('Cannot stop '+unit)
-        run('systemctl','disable',unit)
+        if run('systemctl','is-enabled',unit).stdout.strip()=='enabled':checked('systemctl','disable',unit)
     for path in paths:
         if path.is_dir():shutil.rmtree(path)
         else:path.unlink(missing_ok=True)
-    run('systemctl','daemon-reload')
-    run('service','auditd','restart')
-    if run('/usr/sbin/sshd','-t').returncode==0:run('systemctl','reload','ssh')
+    checked('systemctl','daemon-reload')
+    reload_host(ssh_before!=fingerprint(ssh_path),audit_active)
     print('Agent removed. Configuration, incidents and rollback receipts retained. Loaded audit rules may remain until reboot; host firewall blocks retain their original expiry.')
 
 def main():

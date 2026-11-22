@@ -120,12 +120,8 @@ done
 for path in /root/.bashrc /root/.bash_profile /root/.bash_login /root/.bash_logout /root/.profile /root/.zshenv /root/.zprofile /root/.zshrc /root/.zlogin /root/.zlogout /root/.config/fish /root/.config/systemd/user; do
   [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
 done
-# Preserve the existing administrator's access while making SSH failures observable.
-if [ -x /usr/sbin/sshd ]; then
-printf '%s\n' 'LogLevel VERBOSE' > /etc/ssh/sshd_config.d/60-aegis-observability.conf
-/usr/sbin/sshd -t
-systemctl reload ssh
-fi
+# Respect the host SSH configuration. Existing authentication logs remain usable;
+# administrators may configure more detailed logging through their own change process.
 augenrules --load
 systemctl disable --now defense-agent-dashboard.service defense-lab-gateway.service 2>/dev/null || true
 # One-time conversion enables bounded incremental space reclamation.

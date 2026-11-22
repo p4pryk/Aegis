@@ -50,12 +50,30 @@ class Continuity(unittest.TestCase):
 
     def test_counter_increase_or_reset_fails_even_below_initial_value(self):
         first=release_check.sample(self.db,self.now)
-        for key in ('spool_dropped','kernel_lost','refused_cases'):
+        for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'):
             for change in (-1,1):
                 current=dict(first);current[key]=max(0,first[key]+change)
                 if current[key]!=first[key]:self.assertFalse(release_check.continuous(current,first))
         self.put('sensor_health',{'time':self.now,'audit':{'enabled':'1','lost':'bad'},'audit_spool':{'dropped':2}})
         with self.assertRaises(ValueError):release_check.sample(self.db,self.now)
+
+    def test_unreviewed_parse_error_cannot_hide_behind_stale_healthy_source(self):
+        first=release_check.sample(self.db,self.now)
+        self.put('audit_parse_error',{'count':1,'time':self.now})
+        pending=release_check.sample(self.db,self.now)
+        self.assertIn('Kernel audit: GAP',pending['unhealthy_sources'])
+        self.assertFalse(release_check.continuous(pending,None))
+        self.put('audit_parse_ack',{'count':1})
+        reviewed=release_check.sample(self.db,self.now)
+        self.assertFalse(release_check.continuous(reviewed,first))
+        self.assertTrue(release_check.continuous(reviewed,None))
+
+    def test_invalid_or_regressed_parse_history_fails_closed(self):
+        self.put('audit_parse_error',{'count':'invalid'})
+        with self.assertRaises(ValueError):release_check.sample(self.db,self.now)
+        self.put('audit_parse_error',{'count':2})
+        self.put('audit_parse_ack',{'count':3})
+        self.assertFalse(release_check.continuous(release_check.sample(self.db,self.now),None))
 
     def test_collector_failure_is_not_hidden_by_healthy_core(self):
         health={'time':self.now,'audit':{'enabled':'1','lost':'0'},'audit_spool':{'dropped':0},

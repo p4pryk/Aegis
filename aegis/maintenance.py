@@ -12,6 +12,13 @@ import time
 TABLES = ('case_events', 'case_status_history', 'case_versions', 'response_runs',
           'response_steps', 'response_attempts', 'case_timings', 'case_parts', 'analysis_queue')
 ACTIVE = ('collecting', 'awaiting_analysis', 'recognized')
+REVIEW = ('review_required', 'analysis_error', 'defense_error')
+
+
+def operator_identity():
+    sudo_uid=os.environ.get('SUDO_UID','')
+    return {'uid':os.getuid(),'effective_uid':os.geteuid(),
+            'sudo_uid':int(sudo_uid) if re.fullmatch(r'[0-9]{1,10}',sudo_uid) else None}
 
 
 def storage(db):
@@ -54,7 +61,9 @@ def maintain(engine, now=None):
     # Bounded deletion; only completed cases older than the correlation window qualify.
     cutoff = now-600 if before['database_used_bytes'] > target else now-keep
     with engine.store.atomic():
-        ids = [r[0] for r in db.execute("SELECT id FROM cases WHERE status NOT IN (?,?,?) AND updated_at<? ORDER BY updated_at LIMIT 100", (*ACTIVE, cutoff))]
+        protected = ACTIVE + REVIEW
+        placeholders = ','.join('?' for _ in protected)
+        ids = [r[0] for r in db.execute(f"SELECT id FROM cases WHERE status NOT IN ({placeholders}) AND updated_at<? ORDER BY updated_at LIMIT 100", (*protected, cutoff))]
         for identifier in ids:
             for table in TABLES:
                 db.execute('DELETE FROM '+table+' WHERE case_id=?', (identifier,))
@@ -108,8 +117,75 @@ def export_case(database, identifier, output):
         db.close()
 
 
+def resolve_review(database, identifier, version, reason):
+    """Record an operator's review; this does not execute or undo a response."""
+    if os.geteuid() != 0: raise PermissionError('Run as root')
+    if not re.fullmatch(r'[a-f0-9]{24}', identifier) or type(version) is not int or version < 1:
+        raise ValueError('Invalid case ID or version')
+    if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500:
+        raise ValueError('A reason of 1–500 characters is required')
+    db = sqlite3.connect(pathlib.Path(database).resolve().as_uri()+'?mode=rw', uri=True)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        case = db.execute('SELECT version,status FROM cases WHERE id=?', (identifier,)).fetchone()
+        if not case or case[0] != version or case[1] not in REVIEW:
+            raise ValueError('Case or version changed, or no review is pending')
+        if db.execute("SELECT 1 FROM response_steps WHERE case_id=? AND status IN ('pending','running')", (identifier,)).fetchone():
+            raise ValueError('Response is still pending; inspect it before closing the review')
+        now = time.time()
+        details = {'reason': reason.strip(), 'version': version, 'previous_status': case[1],**operator_identity()}
+        db.execute("UPDATE cases SET status='review_closed',updated_at=? WHERE id=?", (now, identifier))
+        db.execute('INSERT INTO case_status_history VALUES (?,?,?,?)',
+                   (identifier, 'review_closed', now, json.dumps(details)))
+        db.commit()
+    finally:
+        db.close()
+
+
+def acknowledge_audit_parse(database, expected_count, reason):
+    """Record review of a specific audit gap without pretending to recover records."""
+    from monitoring import audit_parse_counts
+    if os.geteuid()!=0:raise PermissionError('Run as root')
+    if type(expected_count) is not int or expected_count<1:raise ValueError('Invalid expected count')
+    if not isinstance(reason,str) or not 1<=len(reason.strip())<=500:raise ValueError('A reason of 1–500 characters is required')
+    db=sqlite3.connect(pathlib.Path(database).resolve().as_uri()+'?mode=rw',uri=True,timeout=10)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        values={key:json.loads(value) for key,value in db.execute("SELECT key,value FROM state WHERE key IN ('audit_parse_error','audit_parse_ack')")}
+        gap=values.get('audit_parse_error');total,_,unresolved=audit_parse_counts(gap,values.get('audit_parse_ack'))
+        if total!=expected_count or not unresolved:raise ValueError('Audit gap changed or is already reviewed; inspect current source health')
+        if not isinstance(gap,dict):raise ValueError('Invalid audit gap; manual investigation required')
+        now=time.time()
+        entry={'time':now,'count':total,'reason':reason.strip(),**operator_identity(),
+               'gap_time':gap.get('time'),'last_record_id':gap.get('last_record_id')}
+        db.execute('CREATE TABLE IF NOT EXISTS audit_gap_reviews(time REAL,count INTEGER,details_json TEXT)')
+        db.execute('INSERT INTO audit_gap_reviews VALUES (?,?,?)',(now,total,json.dumps(entry)))
+        db.execute("INSERT OR REPLACE INTO state VALUES ('audit_parse_ack',?)",(json.dumps(entry),))
+        db.commit()
+    finally:db.close()
+
+
+def audit_gap_history(database):
+    db=sqlite3.connect(pathlib.Path(database).resolve().as_uri()+'?mode=ro',uri=True,timeout=10)
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_gap_reviews'").fetchone():return []
+        return [json.loads(row[0]) for row in db.execute('SELECT details_json FROM audit_gap_reviews ORDER BY rowid DESC LIMIT 100')]
+    finally:db.close()
+
+
 if __name__ == '__main__':
-    parser=argparse.ArgumentParser(description='Export a retained AEGIS case and its evidence')
-    parser.add_argument('case_id');parser.add_argument('--output',required=True)
+    parser=argparse.ArgumentParser(description='Export a case, record a review, or inspect audit gap history')
+    parser.add_argument('case_id',nargs='?');parser.add_argument('--output')
+    parser.add_argument('--resolve-review',action='store_true');parser.add_argument('--version',type=int);parser.add_argument('--reason')
+    parser.add_argument('--ack-audit-parse',type=int,metavar='COUNT');parser.add_argument('--audit-gap-history',action='store_true')
     parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db')
-    args=parser.parse_args();export_case(args.database,args.case_id,args.output)
+    args=parser.parse_args()
+    if args.resolve_review and args.case_id and not args.output and args.version is not None and args.reason and args.ack_audit_parse is None and not args.audit_gap_history:
+        resolve_review(args.database,args.case_id,args.version,args.reason);print('Review recorded; no response or rollback was performed.')
+    elif args.output and args.case_id and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None and not args.audit_gap_history:
+        export_case(args.database,args.case_id,args.output)
+    elif args.ack_audit_parse is not None and args.reason and not args.case_id and not args.output and not args.resolve_review and args.version is None and not args.audit_gap_history:
+        acknowledge_audit_parse(args.database,args.ack_audit_parse,args.reason);print('Audit gap review recorded; lost records were not recovered.')
+    elif args.audit_gap_history and not args.case_id and not args.output and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None:
+        print(json.dumps(audit_gap_history(args.database),indent=2))
+    else:parser.error('Use CASE_ID --output PATH; CASE_ID --resolve-review --version N --reason TEXT; --ack-audit-parse COUNT --reason TEXT; or --audit-gap-history')

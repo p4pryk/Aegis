@@ -15,6 +15,7 @@ LockPersonality=yes
 RestrictRealtime=yes
 ProtectHome=yes
 ProtectSystem=strict
+PrivateTmp=yes
 ReadWritePaths=/var/lib/defense-agent /var/lib/defense-agent-ai /var/log/defense-agent /run/defense-agent
 MemoryMax=128M
 [Install]

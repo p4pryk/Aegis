@@ -18,6 +18,7 @@ def painted(line):
 
 NAME = 'A E G I S'
 STATES = {'review_required':'REVIEW REQUIRED', 'authorized':'AUTHORIZED', 'collecting':'COLLECTING', 'awaiting_analysis':'ANALYZING', 'recognized':'ASSESSED', 'defended':'DEFENDED', 'observing':'MONITORING', 'insufficient_evidence':'INSUFFICIENT EVIDENCE', 'analysis_error':'ANALYSIS ERROR', 'defense_error':'RESPONSE ERROR'}
+STATES['review_closed'] = 'REVIEW CLOSED'
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 def safe(value):
@@ -124,6 +125,8 @@ def source_lines(data,width,now):
         last=source.get('last_record_at');age=f"{max(0,now-last):.0f}s ago" if last else 'not seen in this collector session'
         lines.extend(wrapped('     Last intake: '+age+' | Pending: '+str(source.get('pending',0))+' '+source.get('unit','records')+f" | Delay: {source.get('lag_seconds',0):.1f}s",width))
         lines.extend(wrapped('     '+source.get('reason',''),width,level));lines.append('')
+        if source.get('name')=='Kernel audit' and source.get('audit_parse_errors'):
+            lines.extend(wrapped(f"     Historical parse gaps: {source['audit_parse_errors']} | Reviewed: {source.get('audit_parse_reviewed',0)}. Lost records are not recovered.",width,'warning'));lines.append('')
     coverage=data.get('sensor_health',{}).get('system_log_coverage',{})
     if coverage:
         lines.append('-'*width)

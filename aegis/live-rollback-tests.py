@@ -1,9 +1,9 @@
-"""Isolated VM only: real executor, private receipts and explicit root CLI rollback."""
+"""Isolated VM only: direct receipt/rollback tests; socket authorization is tested separately."""
 import hashlib,json,os,pathlib,pwd,subprocess,sys,tempfile,time
 sys.path.insert(0,'/opt/defense-agent')
-from agent import load_config,request_executor
+from agent import load_config,Executor
 from rollback import account,Journal
-c=load_config();journal=Journal(c);suffix=str(int(time.time()))[-7:]
+c=load_config();journal=Journal(c);executor=Executor(c);executor.firewall_init();suffix=str(int(time.time()))[-7:]
 user='lab_rb_'+suffix;fault_user='lab_rbf_'+suffix;cron=pathlib.Path('/etc/cron.d/lab_aegis_rb'+suffix)
 unit=pathlib.Path('/etc/systemd/system/lab-aegis-rb'+suffix+'.service')
 ns='aegis-rollback-test';ip='10.252.80.2';host='10.252.80.1';extra='10.252.80.3';server=None;checks=[]
@@ -11,7 +11,7 @@ def run(args,check=True):return subprocess.run(args,capture_output=True,text=Tru
 def check(name,condition):
     checks.append({'test':name,'passed':bool(condition)});print(json.dumps(checks[-1]),flush=True)
     if not condition:raise AssertionError(name)
-def call(action):return request_executor(c,action)['undo_receipt']
+def call(action):return journal.record(executor,action)['undo_receipt']
 def cli(op,identifier=None,**options):
     args=['python3','/opt/defense-agent/rollback.py',op]+([identifier] if identifier else [])
     for key,value in options.items():args+=['--'+key,str(value)]

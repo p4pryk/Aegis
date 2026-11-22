@@ -56,6 +56,20 @@ def service_active(unit):
     except (OSError,subprocess.TimeoutExpired):return False
 
 
+def audit_parse_counts(gap, acknowledgement):
+    """Return total, acknowledged, unresolved; malformed state never clears a gap."""
+    if gap is None or gap == {}:
+        return (0,0,False) if acknowledgement is None or acknowledgement == {} else (None,0,True)
+    if not isinstance(gap,dict):return None,0,True
+    total=gap.get('count',1)  # Records from older releases had no counter.
+    if type(total) is not int or total<1:return None,0,True
+    if acknowledgement is None or acknowledgement=={}:return total,0,True
+    if not isinstance(acknowledgement,dict):return total,0,True
+    reviewed=acknowledgement.get('count')
+    if type(reviewed) is not int or not 1<=reviewed<=total:return total,0,True
+    return total,reviewed,reviewed!=total
+
+
 def source_states(engine,spool,journals,pending,now,kernel_status=None):
     import json
     from journal_stream import arguments
@@ -74,7 +88,9 @@ def source_states(engine,spool,journals,pending,now,kernel_status=None):
     assembly=engine.store.state('audit_assembly_gap') or {}
     legacy=engine.store.state('persistence_incomplete') or engine.store.state('persistence_overload')
     assembly_loss=engine.c.get('persistence_enabled',False) and bool(assembly or legacy)
-    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or int(kernel.get('lost',0)) or assembly_loss), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; file audit assembly gap: {'recorded' if assembly_loss else 'none'}; check audit history")
+    total,reviewed,unresolved=audit_parse_counts(engine.store.state('audit_parse_error'),engine.store.state('audit_parse_ack'))
+    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or int(kernel.get('lost',0)) or assembly_loss or unresolved), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; audit parse errors: {total if total is not None else 'unknown'}; reviewed: {reviewed}; file audit assembly gap: {'recorded' if assembly_loss else 'none'}; check audit history")
+    sources[-1].update(audit_parse_errors=total,audit_parse_reviewed=reviewed)
     journal_active=service_active('systemd-journald.service')
     for key,name in (('ssh','SSH journal'),('journal_context','Service journal')):
         h=journals[key];count,age=pending.get(key,(0,0))

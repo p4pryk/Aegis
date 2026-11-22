@@ -7,7 +7,7 @@ import sqlite3
 import time
 
 def sample(db, now=None):
-    states={key:json.loads(value) for key,value in db.execute("SELECT key,value FROM state WHERE key IN ('heartbeat','sensor_health','model_health','correlation_overload')")}
+    states={key:json.loads(value) for key,value in db.execute("SELECT key,value FROM state WHERE key IN ('heartbeat','sensor_health','model_health','correlation_overload','audit_parse_error','audit_parse_ack')")}
     # SQLite may wait for a writer; compare against the clock after the read.
     now=time.time() if now is None else now
     try:
@@ -31,19 +31,23 @@ def sample(db, now=None):
             statuses[name]=status
         if 'Kernel audit' not in statuses:raise ValueError('Kernel audit collector missing')
         unhealthy=[name+': '+status for name,status in statuses.items() if status not in ('LIVE','QUIET','DISABLED') or name=='Kernel audit' and status=='DISABLED']
+        from monitoring import audit_parse_counts
+        parse_errors,_,unresolved=audit_parse_counts(states.get('audit_parse_error'),states.get('audit_parse_ack'))
+        if parse_errors is None:raise ValueError('Invalid audit parse history')
+        if unresolved and 'Kernel audit: GAP' not in unhealthy:unhealthy.append('Kernel audit: GAP')
     except (KeyError,TypeError,OverflowError) as exc:raise ValueError('Incomplete collector health') from exc
     return {'time':now,'core_alive':0<=now-heartbeat.get('time',0)<15,
             'sensor_alive':0<=now-health_time<15,'core_pid':pid,'boot_id':boot,'unhealthy_sources':unhealthy,
             'response_mode':heartbeat.get('response_mode','unknown'),
             'core_p95_ms':health.get('loop_p95_ms'), 'audit_pending':spool.get('rows'),
-            'spool_dropped':dropped,'kernel_lost':lost,'refused_cases':rejected,
+            'spool_dropped':dropped,'kernel_lost':lost,'refused_cases':rejected,'audit_parse_errors':parse_errors,
             'model_status':states.get('model_health',{}).get('status','UNKNOWN')}
 
 def continuous(item, previous):
     if not item['core_alive'] or not item['sensor_alive'] or item['unhealthy_sources']:return False
     if previous is None:return True
     if (item['boot_id'],item['core_pid'])!=(previous['boot_id'],previous['core_pid']):return False
-    return all(item[key]==previous[key] for key in ('spool_dropped','kernel_lost','refused_cases'))
+    return all(item[key]==previous[key] for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'))
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--seconds',type=int,default=120);parser.add_argument('--output',required=True);parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db');args=parser.parse_args()

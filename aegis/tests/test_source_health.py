@@ -1,7 +1,7 @@
-import json,pathlib,sys,tempfile,time,unittest
+import json,os,pathlib,sys,tempfile,time,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
-import agent,audit_spool,monitoring,console,app_correlation
+import agent,audit_spool,monitoring,console,app_correlation,maintenance
 
 class SourceHealth(unittest.TestCase):
     def setUp(self):
@@ -40,6 +40,38 @@ class SourceHealth(unittest.TestCase):
         self.assertEqual(self.states()[1]['status'],'GAP')
         self.store.state('app_source_gap',{'time':self.now-100})
         self.assertEqual(self.states()[3]['status'],'GAP')
+
+    def test_audit_parse_error_is_a_durable_kernel_gap(self):
+        self.store.state('audit_parse_error',{'time':self.now-30,'error':'ValueError','count':2})
+        row=self.states()[0]
+        self.assertEqual(row['status'],'GAP');self.assertIn('audit parse errors: 2',row['reason'])
+        self.e=agent.CorrelatedEngine(self.c,self.store,None)
+        self.assertEqual(self.states()[0]['status'],'GAP')
+
+    def test_reviewed_parse_gap_remains_visible_and_new_error_reopens_gap(self):
+        self.store.state('audit_parse_error',{'time':self.now-30,'error':'ValueError','count':2,'last_record_id':17})
+        with patch.object(maintenance.os,'geteuid',return_value=0),patch.dict(os.environ,{'SUDO_UID':'1234'}):
+            maintenance.acknowledge_audit_parse(self.store.path,2,'Reviewed collector incident')
+        row=self.states()[0]
+        self.assertEqual(row['status'],'QUIET');self.assertEqual((row['audit_parse_errors'],row['audit_parse_reviewed']),(2,2))
+        text='\n'.join(console.source_lines({'sensor_health':{'time':self.now,'sources':self.states()}},100,self.now))
+        self.assertIn('Historical parse gaps: 2',text);self.assertIn('Lost records are not recovered',text)
+        self.assertEqual(maintenance.audit_gap_history(self.store.path)[0]['sudo_uid'],1234)
+        self.e=agent.CorrelatedEngine(self.c,self.store,None)
+        self.assertEqual(self.states()[0]['audit_parse_reviewed'],2)
+        self.store.state('audit_parse_error',{'time':self.now,'error':'ValueError','count':3,'last_record_id':18})
+        self.assertEqual(self.states()[0]['status'],'GAP')
+
+    def test_acknowledgement_does_not_hide_other_audit_loss(self):
+        self.store.state('audit_parse_error',{'time':self.now,'count':1})
+        with patch.object(maintenance.os,'geteuid',return_value=0):maintenance.acknowledge_audit_parse(self.store.path,1,'Reviewed')
+        self.spool.row_limit=0;self.spool.append('test',self.e.boot_id)
+        self.assertEqual(self.states()[0]['status'],'GAP')
+
+    def test_malformed_gap_or_acknowledgement_never_reports_healthy(self):
+        for gap,ack in (({'count':'2'},{'count':2}),({'count':2},{'count':3}),({}, {'count':2}),({'count':2},'invalid')):
+            self.store.state('audit_parse_error',gap);self.store.state('audit_parse_ack',ack)
+            self.assertEqual(self.states()[0]['status'],'GAP')
 
     def test_audit_file_assembly_loss_is_visible_and_remains_after_recovery(self):
         self.c['persistence_enabled']=True

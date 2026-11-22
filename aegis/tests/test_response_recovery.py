@@ -95,6 +95,15 @@ class ResponseRecovery(unittest.TestCase):
         self.e.tick()
         self.assertEqual(self.status(row), 'defense_error')
 
+    def test_privileged_boundary_rechecks_current_causal_chain(self):
+        row=self.interrupted()
+        envelope={'case_id':row[0],'position':0,'version':row[1]}
+        with patch.object(agent.pwd,'getpwnam',side_effect=self.names):
+            request=response.authorize_step(self.c,envelope)
+        self.assertEqual((request['action'],request['expected_uid']),('quarantine_account',1003))
+        with patch.object(agent.pwd,'getpwnam',return_value=Mock(pw_uid=2000)):
+            with self.assertRaisesRegex(ValueError,'no longer supports'):response.authorize_step(self.c,envelope)
+
     def test_boot_change_stops_recovery(self):
         row = self.interrupted()
         self.e.boot_id = 'another-boot'
