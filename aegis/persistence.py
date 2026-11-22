@@ -2,6 +2,8 @@
 import hashlib,json,os,pathlib,posixpath,re,stat,time
 
 QUARANTINE = pathlib.Path('/var/lib/defense-agent/quarantine')
+LOG_CONFIG_FILES=('/etc/audit/auditd.conf','/etc/audit/audit.rules','/etc/systemd/journald.conf','/etc/rsyslog.conf')
+LOG_CONFIG_DIRS=('/etc/audit/rules.d','/etc/audit/plugins.d','/etc/systemd/journald.conf.d','/etc/rsyslog.d')
 
 def scope(path):
     p=pathlib.PurePosixPath(path)
@@ -60,8 +62,10 @@ def quarantine(request):
 def watched_path(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
+    p=pathlib.PurePosixPath('/'+path.lstrip('/'));path=str(p)
     if path in ('/etc/passwd','/etc/shadow','/etc/group','/etc/gshadow','/etc/sudoers') or str(p.parent)=='/etc/sudoers.d':return 'identity_permissions'
     if path in ('/etc/ssh/sshd_config','/etc/security/access.conf') or any(p==root or root in p.parents for root in (pathlib.PurePosixPath('/etc/ssh/sshd_config.d'),pathlib.PurePosixPath('/etc/pam.d'))):return 'authentication_configuration'
+    if path in LOG_CONFIG_FILES or any(p==root or root in p.parents for root in map(pathlib.PurePosixPath,LOG_CONFIG_DIRS)):return 'security_logging_configuration'
     return scope(path)
 
 
@@ -111,7 +115,7 @@ def audit(engine,kind,stamp,serial,content):
             if not mechanism or (path,operation) in seen:continue
             seen.add((path,operation))
             details=dict(group['details'],path=path,operation=operation,mechanism=mechanism,audited_inode=metadata)
-            event_kind='security_file_change' if mechanism in ('identity_permissions','authentication_configuration') else 'persistence_change'
+            event_kind='security_file_change' if mechanism in ('identity_permissions','authentication_configuration','security_logging_configuration') else 'persistence_change'
             event=engine.normalize(event_kind,path,details,key+':file:'+hashlib.sha256((path+':'+operation).encode()).hexdigest()[:12],float(stamp))
             if engine.remember(event):
                 engine.store.observe('auditd',event_kind,path,'Security-related file changed; correlating actor/session metadata, not file contents.',event['event_id'],event['event_time'])

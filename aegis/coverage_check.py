@@ -2,6 +2,8 @@
 import os,pathlib,re,shlex,stat,subprocess,threading,time
 
 AUTH_WATCHES=('/etc/ssh/sshd_config','/etc/ssh/sshd_config.d','/etc/pam.d','/etc/security/access.conf')
+from persistence import LOG_CONFIG_FILES,LOG_CONFIG_DIRS
+LOG_WATCHES=LOG_CONFIG_FILES+LOG_CONFIG_DIRS
 
 CATALOG=(
  ('Nginx',('nginx.service',),('/var/log/nginx/access.log','/var/log/nginx/error.log'),'Access logs can use the access adapter; error logs need a supported structured export.'),
@@ -38,7 +40,7 @@ def inventory():
     keys=None if rules is None else sorted(set(re.findall(r'(?:-k\s+|key=)"?([A-Za-z0-9_-]+)',rules)))
     watches=None
     if rules is not None:
-        watches={path:False for path in AUTH_WATCHES}
+        watches={path:False for path in (*AUTH_WATCHES,*LOG_WATCHES)}
         try:
             for line in rules.splitlines():
                 args=shlex.split(line)
@@ -72,12 +74,13 @@ def assess(config,health,facts,inspect=metadata,now=None):
         'Verify the actual rule filters and watched paths; key presence alone does not establish full syscall/file coverage.')
     if not config.get('persistence_enabled',False):
         add('Authentication configuration watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
+        add('Logging configuration watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
     else:
         watches=facts.get('identity_watches')
-        for path in AUTH_WATCHES:
+        for path in (*AUTH_WATCHES,*LOG_WATCHES):
             kind=inspect(path).get('kind','unknown')
             status=('MISSING' if kind=='missing' else 'UNSAFE' if kind=='unsafe' else 'UNKNOWN' if kind not in ('file','directory') or watches is None else 'WATCH PRESENT' if watches.get(path) else 'RULES MISSING')
-            add('Auth watch '+path,status,path,'Only the expected write/attribute watch and key are checked; audit health and actual event delivery must also be verified.' if status=='WATCH PRESENT' else 'Inspect this path and its audit rules; absent paths need a watch after they are created. Other rule forms require manual verification.')
+            add(('Auth watch ' if path in AUTH_WATCHES else 'Log watch ')+path,status,path,'Only the expected write/attribute watch and key are checked; audit health and actual event delivery must also be verified.' if status=='WATCH PRESENT' else 'Inspect this path and its audit rules; absent paths need a watch after they are created. Other rule forms require manual verification.')
     configured=[]
     for item in config.get('application_sources',[])[:8]:
         path=item['path'];info=inspect(path);source=sources.get('App '+item['name'],{})

@@ -105,6 +105,9 @@ EOF
 for path in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/pam.d /etc/security/access.conf; do
   [ ! -e "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_identity" >> /etc/audit/rules.d/aegis-observe.rules
 done
+for path in /etc/audit/auditd.conf /etc/audit/audit.rules /etc/audit/rules.d /etc/audit/plugins.d /etc/systemd/journald.conf /etc/systemd/journald.conf.d /etc/rsyslog.conf /etc/rsyslog.d; do
+  [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_identity" >> /etc/audit/rules.d/aegis-observe.rules
+done
 if $demo; then
   printf '%s\n' "-a always,exit -F arch=b64 -S execve,execveat -F euid=$(id -u aegis-target) -k aegis_app_exec" >> /etc/audit/rules.d/aegis-observe.rules
 fi

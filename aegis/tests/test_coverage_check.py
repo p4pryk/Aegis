@@ -85,7 +85,7 @@ class Coverage(unittest.TestCase):
             for p in (fifo,link):self.assertEqual(coverage.metadata(p)['kind'],'unsafe')
     def test_collector_gaps_remain_review_items(self):
         self.health['sources'][0]['status']='GAP'
-        report=self.assess();self.assertEqual(report['gaps'],2)
+        report=self.assess();self.assertEqual(report['gaps'],3)
         self.assertTrue(any(getattr(line,'level',None)=='warning' and '[GAP]' in line for line in coverage.lines(report,104,100)))
     def test_source_screen_safely_renders_report(self):
         report=self.assess();report['rows'][0]['name']='test\x1b[2J'
@@ -93,5 +93,15 @@ class Coverage(unittest.TestCase):
         lines=console.source_lines({'sensor_health':self.health},104,100)
         self.assertIn('COVERAGE CHECK',' '.join(lines));self.assertNotIn('\x1b',' '.join(lines))
         self.assertTrue(all(console.cells(line)<=104 for line in lines))
+
+    def test_logging_watch_inventory_reports_missing_and_present_paths(self):
+        rules='-w /etc/audit/rules.d -p wa -k aegis_identity\n-w /etc/rsyslog.d -p w -k aegis_identity'
+        with patch.object(coverage,'command',side_effect=['Id=sshd.service\nLoadState=loaded\nActiveState=active\n',rules]):facts=coverage.inventory()
+        self.facts.update(facts)
+        files={'/etc/audit/rules.d':{'kind':'directory'},'/etc/rsyslog.d':{'kind':'directory'}}
+        rows={r['name']:r['status'] for r in self.assess({'persistence_enabled':True},files)['rows']}
+        self.assertEqual(rows['Log watch /etc/audit/rules.d'],'WATCH PRESENT')
+        self.assertEqual(rows['Log watch /etc/rsyslog.d'],'RULES MISSING')
+        self.assertEqual(rows['Log watch /etc/audit/auditd.conf'],'MISSING')
 
 if __name__=='__main__':unittest.main()
