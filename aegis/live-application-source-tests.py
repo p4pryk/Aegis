@@ -35,6 +35,7 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
             if self.path=='/login':
                 kind='signin';outcome='success' if body.get('password')=='test-password' else 'failure';status=200 if outcome=='success' else 401
                 if outcome=='success':sid=session
+                else:sid='failed-'+uuid.uuid4().hex
             elif self.path=='/users':
                 sid=self.headers.get('X-Test-Session');outcome='success' if sid==session else 'failure';status=201 if outcome=='success' else 403;kind='user_added'
                 if outcome=='success':created.add('temporary-user')
@@ -89,6 +90,22 @@ with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
         evidence=json.loads(case[0]);relations=[edge['relation'] for edge in evidence['edges']]
         check('Request and session links are application-reported context',any('request_id_hash' in r for r in relations) and any('session_id_hash' in r for r in relations) and all('not_causal' in r for r in relations))
         check('Generic logs cannot authorize defense',evidence['allowed_actions']==[])
+        def auth_case(user):
+            for raw, in read("SELECT evidence_json FROM cases WHERE subject LIKE ?",(app+':%',)):
+                item=json.loads(raw)
+                if any(s.get('kind')=='reported_app_success_after_failures' for s in item.get('signals',[])) and any(e['details'].get('user')==user and e['details'].get('outcome')=='success' for e in item.get('events',[])):return item
+        correlated=wait(lambda:auth_case('alice'))
+        attempts=[e for e in correlated['events'] if e['details'].get('event')=='authentication' and e['details'].get('outcome')=='failure']
+        check('Five real failed logins across sessions precede a reported success',len(attempts)>=5 and len({e['details'].get('session_id_hash') for e in attempts})>=5)
+        check('Cross-session authentication links are contextual and grant no action',not correlated['allowed_actions'] and all('not_causal' in e['relation'] for e in correlated['edges']))
+        # Producer records arrive out of order: the success is read before its earlier failures.
+        delayed=time.time()-20
+        append('backend',dict(ts=delayed+10,audit=dict(action='signin',result='success',actor='bob',remote='127.0.0.1',session='delayed-success')))
+        wait(lambda:any(json.loads(raw).get('user')=='bob' and json.loads(raw).get('outcome')=='success' for (raw,) in read("SELECT details_json FROM correlation_events WHERE subject=?",(app,))))
+        for n in reversed(range(5)):
+            append('backend',dict(ts=delayed+n,audit=dict(action='signin',result='failure',actor='bob',remote='127.0.0.1',session='delayed-failure-'+str(n))))
+        late=wait(lambda:auth_case('bob'))
+        check('Delayed failure records enrich the earlier-received success',bool(late['signals']) and not late['allowed_actions'])
         # More than one model batch, with a core restart before the late consequence.
         for n in range(95):
             append('backend',dict(ts=time.time(),audit=dict(action='permission_changed' if n==94 else 'security_alert',session=session,request='continuation-'+str(n),actor='alice',remote='127.0.0.1',result='success')))

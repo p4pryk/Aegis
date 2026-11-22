@@ -107,6 +107,25 @@ def parse(raw,source,identifier):
     d['review_signal']=bool(d.get('sqli_signature') or d.get('web_signals') or event in ('account_created','permission_changed','security_alert','application_error'))
     return dict(event_id=identifier,event_time=stamp,kind='application_event',subject=source['application'],details=d)
 
+def auth_records(engine,app,user,ip,outcome,start,end,limit=30,exclusive_end=False):
+    operator='<' if exclusive_end else '<='
+    rows=engine.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events INDEXED BY correlation_app_auth_lookup WHERE kind='application_event' AND subject=? AND json_extract(details_json,'$.event')='authentication' AND json_extract(details_json,'$.user')=? AND json_extract(details_json,'$.ip')=? AND json_extract(details_json,'$.outcome')=? AND event_time>=? AND event_time"+operator+"? ORDER BY event_time DESC LIMIT ?",(app,user,ip,outcome,start,end,limit)).fetchall()
+    return [engine.normalize(r[2],r[3],json.loads(r[4]),r[0],r[1]) for r in rows]
+
+def auth_chain(events):
+    unique={e['event_id']:e for e in events if e['kind']=='application_event' and e['details'].get('event')=='authentication'}
+    ordered=sorted(unique.values(),key=lambda e:(e['event_time'],e['event_id']))
+    for success in reversed(ordered):
+        d=success['details']
+        if d.get('outcome')!='success' or not d.get('user') or not d.get('ip'):continue
+        failures=[e for e in ordered if e['details'].get('outcome')=='failure' and e['subject']==success['subject'] and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip'] and 0<success['event_time']-e['event_time']<=300]
+        if len(failures)>=5:return success,failures
+    return None,[]
+
+def auth_signals(events):
+    success,failures=auth_chain(events)
+    return [{'kind':'reported_app_success_after_failures','failure_count':len(failures)}] if success else []
+
 def ingest(engine,event):
     if not -5<=time.time()-event['event_time']<=600:return
     if not engine.remember(event):return
@@ -114,8 +133,8 @@ def ingest(engine,event):
     engine.store.observe('application:'+d['source'],'application_signal' if d['review_signal'] else 'application_event',app,'Application-reported '+d['event']+'; outcome '+d.get('outcome','unknown')+'. No containment authorized.',event['event_id'],event['event_time'])
     rows=engine.db.execute("SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE kind='application_event' AND subject=? AND event_time BETWEEN ? AND ? ORDER BY event_time DESC LIMIT 256",(app,time.time()-600,time.time()+5)).fetchall()
     recent=[engine.normalize(r[2],r[3],json.loads(r[4]),r[0],r[1]) for r in rows]
-    failure=d['event']=='authentication' and d.get('outcome')=='failure'
-    threshold=failure and d.get('user') and d.get('ip') and sum(e['details'].get('event')=='authentication' and e['details'].get('outcome')=='failure' and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip'] for e in recent)>=5
+    auth=d['event']=='authentication' and d.get('outcome') in ('failure','success') and d.get('user') and d.get('ip')
+    failures=auth_records(engine,app,d['user'],d['ip'],'failure',event['event_time']-300,event['event_time'],exclusive_end=d['outcome']=='success') if auth else []
     # Session claims partition evidence; they never establish trusted attribution.
     def scope(details):
         if details.get('session_id_hash'):return 'session:'+details['session_id_hash']
@@ -128,10 +147,21 @@ def ingest(engine,event):
     group=scope(d);subject=app+':'+hashlib.sha256(group.encode()).hexdigest()[:24]
     existing=engine.db.execute("SELECT id FROM cases WHERE kind='application_activity' AND subject=? AND created_at>? AND status NOT IN ('defended','recognized','defense_error') ORDER BY created_at DESC LIMIT 1",(subject,time.time()-120)).fetchone()
     related=[e for e in recent if scope(e['details'])==group]
-    failures=[e for e in recent if e['details'].get('event')=='authentication' and e['details'].get('outcome')=='failure' and not e['details'].get('session_id_hash') and d.get('user') and d.get('ip') and e['details'].get('user')==d['user'] and e['details'].get('ip')==d['ip']]
-    if not (d['review_signal'] or threshold or existing or len(failures)>=5):return
-    selected={e['event_id']:e for e in [event,*related[:26],*failures[:5]]}
-    engine.create_or_append('application_activity',subject,event,list(selected.values())[:32])
+    if d['review_signal'] or existing or len(failures)>=5:
+        selected={e['event_id']:e for e in [event,*failures,*related]}
+        engine.create_or_append('application_activity',subject,event,list(selected.values())[:32])
+    # A delayed failure can complete an earlier-received success without relying on arrival order.
+    if auth and d['outcome']=='failure':
+        for success in auth_records(engine,app,d['user'],d['ip'],'success',event['event_time'],min(event['event_time']+300,time.time()+5),16):
+            if success['event_time']<=event['event_time']:continue
+            prior=auth_records(engine,app,d['user'],d['ip'],'failure',success['event_time']-300,success['event_time'],exclusive_end=True)
+            if len(prior)<5:continue
+            group=scope(success['details']);target=app+':'+hashlib.sha256(group.encode()).hexdigest()[:24]
+            context=[e for e in recent if scope(e['details'])==group]
+            selected={e['event_id']:e for e in [success,*prior,*context]}
+            current=engine.db.execute("SELECT p.root_id FROM cases c JOIN case_parts p ON p.case_id=c.id WHERE c.kind='application_activity' AND c.subject=? AND c.created_at>? AND c.status NOT IN ('defended','recognized','defense_error','superseded') ORDER BY c.created_at DESC LIMIT 1",(target,time.time()-max(120,min(3600,int(engine.c.get('incident_context_seconds',3600)))))).fetchone()
+            fresh=success if not current else next((e for e in [success,*prior] if not engine.db.execute('SELECT 1 FROM case_events e JOIN case_parts p ON p.case_id=e.case_id WHERE p.root_id=? AND e.event_id=? LIMIT 1',(current[0],e['event_id'])).fetchone()),None)
+            if fresh:engine.create_or_append('application_activity',target,fresh,list(selected.values())[:32])
 
 def carry_context(events):
     """Keep representative signals and recent context without growing model input."""
@@ -140,7 +170,10 @@ def carry_context(events):
         d=event['details']
         key=('authentication',d.get('outcome')) if d.get('event')=='authentication' else ('sqli',) if d.get('sqli_signature') else ('web_probe',) if d.get('web_signals') else (d.get('event'),)
         if d.get('review_signal') or d.get('event')=='authentication':anchors[key]=event
-    selected={e['event_id']:e for e in [*list(anchors.values())[:6],*events[-2:]]}
+    success,failures=auth_chain(events)
+    auth=[*failures[-5:],success] if success else []
+    priority=[anchors[key] for key in (('account_created',),('permission_changed',),('sqli',),('web_probe',)) if key in anchors]
+    selected={e['event_id']:e for e in ([*auth,*priority,*events[-2:],*list(anchors.values())[:6]] if auth else [*list(anchors.values())[:6],*events[-2:]])}
     return list(selected.values())[:8]
 
 def links(events):
@@ -156,6 +189,9 @@ def links(events):
                 result.append(dict(from_=prior['event_id'],to=event['event_id'],relation='application_reported_'+field+'_not_causal'))
                 result[-1]['from']=result[-1].pop('from_')
             seen[key]=event
+    success,failures=auth_chain(events)
+    if success:
+        result.extend({'from':failure['event_id'],'to':success['event_id'],'relation':'same_reported_application_account_ip_prior_failure_not_causal'} for failure in failures)
     return result
 
 class Applications(Files):

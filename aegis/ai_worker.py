@@ -14,6 +14,7 @@ An SSH success after failures reports the same account and source in a bounded w
 HTTP traversal and sensitive-file probe signatures describe request patterns, not confirmed file access, and do not authorize a response.
 HTTP cases group nearby records by their reported IP and observed service. Shared IP, service, or time does not establish one actor, a session, causality or successful exploitation; producers can report inaccurate addresses. No generic HTTP case authorizes a defensive action.
 File-reported SSH authentication is untrusted producer data; matching account and IP is context, not proof of session identity or an authorized response.
+An application-reported success following failures is unverified producer context: a shared account and IP across sessions does not prove compromise, session identity or causality and grants no response.
 Return JSON only: summary (nonempty, <=100 words), uncertainty and next_step (strings, <=50 words each), attack (boolean), confidence (0..1), evidence_ids (actual event IDs), proposed_action_ids (unique catalog IDs only). You have no execution tools.'''
 
 def safe_json(value):

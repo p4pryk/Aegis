@@ -241,6 +241,7 @@ class CorrelatedEngine:
         CREATE INDEX IF NOT EXISTS correlation_time ON correlation_events(event_time);
         CREATE INDEX IF NOT EXISTS correlation_subject_time ON correlation_events(kind,subject,event_time);
         CREATE INDEX IF NOT EXISTS correlation_kind_time ON correlation_events(kind,event_time);
+        CREATE INDEX IF NOT EXISTS correlation_app_auth_lookup ON correlation_events(subject,json_extract(details_json,'$.user'),json_extract(details_json,'$.ip'),json_extract(details_json,'$.outcome'),event_time) WHERE kind='application_event' AND json_extract(details_json,'$.event')='authentication';
         CREATE INDEX IF NOT EXISTS case_history_lookup ON case_status_history(case_id,time);
         CREATE TABLE IF NOT EXISTS pending_account_resolution(event_id TEXT PRIMARY KEY,event_time REAL,details_json TEXT,deadline REAL);
         CREATE TABLE IF NOT EXISTS ssh_sessions(identity TEXT PRIMARY KEY,event_id TEXT,event_time REAL,details_json TEXT,active INTEGER);''');self.db.commit()
@@ -293,8 +294,10 @@ class CorrelatedEngine:
                     chosen={e['event_id']:e for e in [*extra,*previous[-8:]] if e['event_id']!=event['event_id']}
                     extra=list(chosen.values())[:32]
                 else:
-                    from application_sources import carry_context
-                    extra=carry_context(previous)
+                    from application_sources import carry_context,auth_chain
+                    carried=carry_context(previous)
+                    success,failures=auth_chain([event,*extra]) if kind=='application_activity' else (None,[])
+                    extra=list({e['event_id']:e for e in ([success,*failures[-5:],*carried] if success else carried)}.values())[:31]
                 row=None
         identifier=row[0] if row else hashlib.sha256((kind+':'+subject+':'+identity_event['event_id']).encode()).hexdigest()[:24]
         if not row:
@@ -654,6 +657,9 @@ class CorrelatedEngine:
         if kind=='system_activity' and subject.startswith('system-auth:'):
             from system_sources import file_auth_signal
             signals=file_auth_signal(events)
+        if kind=='application_activity':
+            from application_sources import auth_signals
+            signals=auth_signals(events)
         if kind=='app_sql_persistence':
             from persistence import plan
             allowed,required,edges=plan(events,self.c,self.boot_id)

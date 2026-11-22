@@ -53,6 +53,73 @@ class Applications(unittest.TestCase):
         self.insert(self.event('permission_changed',outcome='success',request_id='r2',session_id='s1'))
         snap=self.engine.snapshot(*self.cases()[-1]);self.assertEqual(len(snap['events']),7);self.assertFalse(snap['allowed_actions'])
         self.assertTrue(snap['edges']);self.assertTrue(all('not_causal' in e['relation'] for e in snap['edges']))
+
+    def test_failures_across_sessions_join_success_as_untrusted_context(self):
+        stamp=time.time()-20
+        for n in range(5):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1',session_id='failure-'+str(n));event['event_time']=stamp+n;self.insert(event)
+        success=self.event(outcome='success',user='alice',ip='192.0.2.1',session_id='success-session');success['event_time']=stamp+6;self.insert(success)
+        change=self.event('permission_changed',session_id='success-session');change['event_time']=stamp+7;self.insert(change)
+        row=self.cases()[-1];snap=self.engine.snapshot(*row)
+        self.assertEqual(len(snap['events']),7);self.assertEqual(snap['allowed_actions'],[])
+        self.assertEqual(snap['signals'],[{'kind':'reported_app_success_after_failures','failure_count':5}])
+        self.assertEqual(sum(e['relation']=='same_reported_application_account_ip_prior_failure_not_causal' for e in snap['edges']),5)
+        case={'id':row[0],'kind':row[1],'status':'collecting','evidence_json':json.dumps(snap)}
+        self.assertIn('Application reports success after at least 5 failures',' '.join(console.case_lines({'cases':[case]},120)))
+        self.assertIn('Application reports success after at least 5 failures',' '.join(console.chain_lines({'cases':[case]},120)))
+
+    def test_late_failures_complete_previously_recorded_success(self):
+        stamp=time.time()-30
+        success=self.event(outcome='success',user='alice',ip='192.0.2.1',session_id='success');success['event_time']=stamp+10;self.insert(success)
+        self.assertFalse(self.cases())
+        for n in reversed(range(5)):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1',session_id='attempt-'+str(n));event['event_time']=stamp+n;self.insert(event)
+        snapshots=[self.engine.snapshot(*row) for row in self.cases()]
+        self.assertTrue(any(s['signals'] and s['signals'][0]['failure_count']==5 and any(e['event_id']==success['event_id'] for e in s['events']) and not s['allowed_actions'] for s in snapshots))
+
+    def test_late_failures_enrich_success_already_in_a_full_case(self):
+        stamp=time.time()-30
+        success=self.event(outcome='success',user='alice',ip='192.0.2.1',session_id='success');success['event_time']=stamp+10;self.insert(success)
+        for n in range(31):self.insert(self.event('security_alert',session_id='success',request_id='existing-'+str(n)))
+        self.assertEqual(len(self.engine.events(self.cases()[-1][0])),32)
+        for n in reversed(range(5)):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1',session_id='attempt-'+str(n));event['event_time']=stamp+n;self.insert(event)
+        snapshots=[self.engine.snapshot(*row) for row in self.cases()]
+        self.assertTrue(any(s['signals'] and s['signals'][0]['failure_count']>=5 and any(e['event_id']==success['event_id'] for e in s['events']) and not s['allowed_actions'] for s in snapshots))
+
+    def test_auth_correlation_excludes_other_accounts_ips_apps_and_equal_timestamps(self):
+        stamp=time.time()-20
+        for n in range(5):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1',session_id='f'+str(n));event['event_time']=stamp;self.insert(event)
+        variants=[dict(user='bob',ip='192.0.2.1'),dict(user='alice',ip='192.0.2.2'),dict(user='alice',ip='192.0.2.1',source=dict(self.source,application='other'))]
+        for n,variant in enumerate(variants):
+            event=self.event(outcome='success',session_id='other'+str(n),**variant);event['event_time']=stamp+1;self.insert(event)
+        equal=self.event(outcome='success',user='alice',ip='192.0.2.1',session_id='equal');equal['event_time']=stamp;self.insert(equal)
+        self.assertTrue(all(not self.engine.snapshot(*row)['signals'] for row in self.cases()))
+
+    def test_duplicate_failure_ids_do_not_inflate_signal(self):
+        stamp=time.time()-20;events=[]
+        for n in range(4):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1');event['event_time']=stamp+n;events.append(event)
+        success=self.event(outcome='success',user='alice',ip='192.0.2.1');success['event_time']=stamp+5
+        self.assertFalse(apps.auth_signals([*events,events[-1],success]))
+
+    def test_auth_chain_survives_continuation_and_ignores_unrelated_noise(self):
+        stamp=time.time()-30
+        noise=[]
+        for n in range(400):
+            d={'event':'authentication','outcome':'failure','user':'other'+str(n),'ip':'192.0.2.1'}
+            noise.append(('noise:'+str(n),stamp+10,'application_event','store',json.dumps(d)))
+        self.store.db.executemany('INSERT INTO correlation_events VALUES (?,?,?,?,?)',noise);self.store.db.commit()
+        for n in range(5):
+            event=self.event(outcome='failure',user='alice',ip='192.0.2.1',session_id='f'+str(n));event['event_time']=stamp+n;self.insert(event)
+        success=self.event(outcome='success',user='alice',ip='192.0.2.1',session_id='s');success['event_time']=stamp+6;self.insert(success)
+        for n in range(40):self.insert(self.event('security_alert',session_id='s',request_id='continuation-'+str(n)))
+        rows=self.store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='application_activity' AND subject=(SELECT subject FROM cases WHERE kind='application_activity' ORDER BY created_at DESC LIMIT 1) ORDER BY created_at DESC").fetchall()
+        self.assertGreater(len(rows),1);evidence=self.engine.snapshot(*rows[0])
+        self.assertTrue(evidence['signals']);self.assertGreaterEqual(evidence['signals'][0]['failure_count'],5);self.assertFalse(evidence['allowed_actions'])
+        plan=self.store.db.execute("EXPLAIN QUERY PLAN SELECT event_id FROM correlation_events INDEXED BY correlation_app_auth_lookup WHERE kind='application_event' AND subject=? AND json_extract(details_json,'$.event')='authentication' AND json_extract(details_json,'$.user')=? AND json_extract(details_json,'$.ip')=? AND json_extract(details_json,'$.outcome')=? AND event_time>=? AND event_time<? ORDER BY event_time DESC LIMIT ?",('store','alice','192.0.2.1','failure',0,time.time(),30)).fetchall()
+        self.assertTrue(any('correlation_app_auth_lookup' in row[-1] for row in plan))
     def test_unrelated_accounts_do_not_add_up_to_failure_threshold(self):
         for n in range(8):self.insert(self.event(outcome='failure',user='user'+str(n),ip='192.0.2.1'))
         self.assertFalse(self.cases())

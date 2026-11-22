@@ -75,6 +75,8 @@ def case_lines(data,width):
                 lines.extend(wrapped('[!] SSH login after '+str(signal['failure_count'])+' failed attempts from the same IP within 300s; investigate.',width,'warning'))
             if isinstance(signal,dict) and signal.get('kind')=='reported_ssh_success_after_failures' and type(signal.get('failure_count')) is int and 5<=signal['failure_count']<=256:
                 lines.extend(wrapped('[!] File reports SSH login after '+str(signal['failure_count'])+' failures for the same account and IP; verify the source.',width,'warning'))
+            if isinstance(signal,dict) and signal.get('kind')=='reported_app_success_after_failures' and type(signal.get('failure_count')) is int and 5<=signal['failure_count']<=32:
+                lines.extend(wrapped('[!] Application reports success after at least '+str(signal['failure_count'])+' failures for the same account and IP; verify the source.',width,'warning'))
         if login:
             d=login.get('details',{});lines.extend(wrapped('SSH '+str(d.get('user','--'))+' @ '+str(d.get('ip','--'))+' / session '+str(d.get('session','--')),width))
         lines.extend(wrapped('Case: '+str(case.get('id','--'))+' / Evidence: '+str(len(evidence.get('events',[])))+' / links: '+str(len(evidence.get('edges',[]))),width))

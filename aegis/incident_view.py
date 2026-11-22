@@ -21,6 +21,9 @@ def timeline(case):
     if not continuation and len(events)>=(24 if case.get('kind')=='waf_threshold' else 32 if case.get('kind')=='application_activity' else 64 if case.get('kind') in ('host_change','system_activity') else 256):
         lines.append(('Case event limit reached: this view may omit additional telemetry.','warning'))
     if not events:lines.append(('Evidence snapshot not yet available.','warning'))
+    for signal in evidence.get('signals',[]):
+        if isinstance(signal,dict) and signal.get('kind')=='reported_app_success_after_failures' and type(signal.get('failure_count')) is int and 5<=signal['failure_count']<=32:
+            lines.append(('Application reports success after at least '+str(signal['failure_count'])+' failures for the same account and IP; verify the source.','warning'))
     for event in events:
         d=event.get('details',{})
         source=d.get('source') or ('journald' if event['kind'] in ('sudo_command','sudo_auth_failure','su_session_open','su_auth_failure','http_request','http_sqli_signature','http_attack_signature','service_event') else 'application' if event['kind'].startswith('app_') else 'sshd journal' if event['kind']=='ssh_failure' else 'auditd')
