@@ -87,6 +87,23 @@ class PersistenceTests(unittest.TestCase):
             store.db.close()
     def test_file_changed_before_analysis_withholds_action(self):
         with patch.object(persistence,'fingerprint',return_value=('0'*64,(1,2))):self.assertEqual(persistence.plan(self.events,{},self.boot)[0],[])
+    def test_deletion_is_review_only_and_never_proves_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=agent.Store(dict(agent.DEFAULTS,data_dir=directory,persistence_enabled=True));engine=agent.CorrelatedEngine(dict(agent.DEFAULTS,data_dir=directory,persistence_enabled=True),store,None)
+            try:
+                stamp=time.time();path='/home/alice/.bashrc'
+                for line in (f'type=SYSCALL msg=audit({stamp}:931): success=yes pid=9001 uid=1002 auid=1002 ses=42 exe="/usr/bin/rm" key="aegis_persistence"',f'type=PATH msg=audit({stamp}:931): item=0 name="{path}" nametype=DELETE',f'type=EOE msg=audit({stamp}:931):'):
+                    engine.audit_line(line)
+                row=store.db.execute("SELECT id,kind,subject,version FROM cases WHERE kind='persistence_change' AND subject=?",(path,)).fetchone()
+                self.assertIsNotNone(row);evidence=engine.snapshot(*row)
+                self.assertEqual(evidence['events'][0]['details']['operation'],'DELETE');self.assertEqual(evidence['allowed_actions'],[])
+                import incident_view
+                case={'id':row[0],'kind':row[1],'status':'collecting','evidence_json':evidence}
+                self.assertIn('rename or replacement is possible',' '.join(line for line,_ in incident_view.timeline(case)))
+            finally:store.db.close()
+        for op in ('DELETE','DELETED'):
+            events=copy.deepcopy(self.events);events[1]['details']['operation']=op
+            with patch.object(persistence,'fingerprint',return_value=(self.digest,(1,2))):self.assertEqual(persistence.plan(events,{},self.boot)[0],[])
     def test_only_bounded_paths_can_be_quarantined(self):
         for path in ['/root/.ssh/authorized_keys','/etc/crontab','/etc/cron.d/admin','/etc/systemd/system/sshd.service','/etc/cron.d/lab_aegis_../x']:
             self.assertFalse(persistence.lab_path(path))

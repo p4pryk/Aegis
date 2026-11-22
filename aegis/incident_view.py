@@ -30,6 +30,8 @@ def timeline(case):
         fields=('user','actor','target_user','command','op','acct','grp','id','new_uid','new_gid','old_uid','old_gid','pid','ppid','start_ticks','parent_start_ticks','boot_id','audit_session','session','auid','uid','operation','mechanism','request_id','application','event','outcome','ip','method','status','trust','web_signals')
         context=' | '.join(k+'='+str(d[k]) for k in fields if d.get(k) is not None and not (k=='session' and event['kind'].startswith('app_')))
         if context:lines.append(('  '+context,'neutral'))
+        if event['kind'] in ('security_file_change','persistence_change') and d.get('operation') in ('DELETE','DELETED'):
+            lines.append(('  Audit DELETE path record; rename or replacement is possible. Current path state is not verified.','warning'))
         if event['kind'] in ('identity_change','security_file_change','persistence_change') and not d.get('start_ticks'):
             lines.append(('  Process birth identity unavailable; PID alone cannot establish a process link.','warning'))
         if d.get('audited_inode'):lines.append(('  Inode metadata at audit time (not a before/after diff): '+json.dumps(d['audited_inode'],sort_keys=True),'neutral'))

@@ -119,7 +119,7 @@ def audit(engine,kind,stamp,serial,content):
                     from telemetry import identity
                     subject=':'.join(identity(details) or (engine.boot_id,'unattributed'))
                     engine.create_or_append('host_change',subject,event)
-                elif operation not in ('DELETE','DELETED'):engine.create_or_append('persistence_change',path,event)
+                else:engine.create_or_append('persistence_change',path,event)
 
 def chain(engine,job):
     d=job['details'];row=engine.db.execute('SELECT event_id,event_time,kind,subject,details_json FROM correlation_events WHERE event_id=?',('app:'+d['login_id'],)).fetchone()
@@ -135,7 +135,7 @@ def chain(engine,job):
             return
 
 def plan(events,config,boot_id):
-    login=next((e for e in events if e['kind']=='app_login'),None);mutation=next((e for e in events if e['kind']=='persistence_change'),None);job=next((e for e in events if e['kind']=='app_persistence_job'),None)
+    login=next((e for e in events if e['kind']=='app_login'),None);mutation=next((e for e in events if e['kind']=='persistence_change' and e['details'].get('operation') not in ('DELETE','DELETED')),None);job=next((e for e in events if e['kind']=='app_persistence_job'),None)
     if not all((login,mutation,job)):return [],[],[]
     ld,md,jd=[e['details'] for e in (login,mutation,job)]
     if not ld.get('bypass') or not ld.get('success') or ld.get('session')!=jd.get('session') or ld.get('ip')!=jd.get('ip') or jd.get('login_id')!=ld.get('event_id') or not re.fullmatch('[a-f0-9]{32}',ld.get('session','')):return [],[],[]

@@ -30,12 +30,13 @@ def main():
         if shell is None or unit.exists():raise RuntimeError('No unused fixture path is available')
         sshdir=home/'.ssh';sshdir.mkdir(mode=0o700)
         (sshdir/'authorized_keys').write_text((root/'key.pub').read_text());cmd(['chown','-R',actor+':'+actor,str(sshdir)])
-        content='# '+marker+'\n';script=root/'mutate.py'
-        script.write_text('import pathlib\n'+f'p=pathlib.Path({str(shell)!r});p.write_text({content!r})\n'+f'u=pathlib.Path({str(unit)!r});u.parent.mkdir(parents=True,exist_ok=True);u.write_text({content!r})\n');script.chmod(0o644)
+        content='# '+marker+'\n';script=root/'mutate.py';gate=root/'delete-ready'
+        script.write_text('import pathlib,time\n'+f'p=pathlib.Path({str(shell)!r});p.write_text({content!r})\n'+f'u=pathlib.Path({str(unit)!r});u.parent.mkdir(parents=True,exist_ok=True);u.write_text({content!r})\n'+f'gate=pathlib.Path({str(gate)!r})\n'+'\nwhile not gate.exists():time.sleep(.1)\np.unlink()\n');script.chmod(0o644)
         prefix=['ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=3','-i',str(root/'key'),actor+'@127.0.0.1']
-        process=subprocess.Popen(prefix+['python3 '+shlex.quote(str(script))+' && sleep 45'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        process=subprocess.Popen(prefix+['python3 '+shlex.quote(str(script))+' && sleep 45'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
         paths={str(shell):'shell_startup',str(unit):'systemd_user'}
         def recorded():
+            if process.poll() is not None:raise RuntimeError('SSH test process ended before the file changes: '+process.stderr.read()[:400])
             rows=query("SELECT subject,details_json FROM correlation_events WHERE kind='persistence_change' AND event_time>=?",(started,))
             matched=[(subject,json.loads(details)) for subject,details in rows if subject in paths]
             return matched if {subject for subject,_ in matched}==set(paths) else None
@@ -53,11 +54,25 @@ def main():
         check('Both changes link to the audited SSH session',all(any(edge.get('relation')=='exact_audit_session_attribution_not_causal' for edge in item['edges']) for item in evidence.values()))
         check('Standalone changes authorize no action',all(not item['allowed_actions'] for item in evidence.values()))
         check('Fixture file contents are absent from evidence',marker not in json.dumps(evidence))
+        gate.touch()
+        def deletion():
+            for subject,raw in query("SELECT subject,details_json FROM correlation_events WHERE kind='persistence_change' AND subject=? AND event_time>=?",(str(shell),started)):
+                details=json.loads(raw)
+                if details.get('operation')=='DELETE':return details
+        removed=wait(deletion)
+        def delete_case():
+            for raw, in query("SELECT evidence_json FROM cases WHERE kind='persistence_change' AND subject=? ORDER BY created_at DESC",(str(shell),)):
+                item=json.loads(raw)
+                if any(e.get('details',{}).get('operation')=='DELETE' for e in item.get('events',[])):return item
+        case=wait(delete_case)
+        check('Real user-file deletion appears in the incident',not shell.exists() and removed.get('auid')==str(account.pw_uid))
+        check('Deletion retains session attribution but grants no action',any(e.get('relation')=='exact_audit_session_attribution_not_causal' for e in case['edges']) and not case['allowed_actions'])
     finally:
         if process and process.poll() is None:
             process.terminate()
             try:process.wait(timeout=3)
             except subprocess.TimeoutExpired:process.kill();process.wait()
+        if process and process.stderr:process.stderr.close()
         try:
             if made:remove_test_user(actor)
         finally:shutil.rmtree(root,ignore_errors=True)
