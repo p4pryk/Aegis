@@ -108,13 +108,16 @@ done
 for path in /etc/audit/auditd.conf /etc/audit/audit.rules /etc/audit/rules.d /etc/audit/plugins.d /etc/systemd/journald.conf /etc/systemd/journald.conf.d /etc/rsyslog.conf /etc/rsyslog.d; do
   [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_identity" >> /etc/audit/rules.d/aegis-observe.rules
 done
+for path in /etc/environment /etc/profile /etc/bash.bashrc /etc/zsh/zshenv /etc/zsh/zprofile /etc/zsh/zshrc /etc/zsh/zlogin /etc/zsh/zlogout /etc/fish/config.fish /etc/profile.d /etc/fish/conf.d; do
+  [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
+done
 if $demo; then
   printf '%s\n' "-a always,exit -F arch=b64 -S execve,execveat -F euid=$(id -u aegis-target) -k aegis_app_exec" >> /etc/audit/rules.d/aegis-observe.rules
 fi
 for path in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /var/spool/cron/crontabs; do
   [ ! -d "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
 done
-for path in /root/.bashrc /root/.bash_profile /root/.profile /root/.zshrc /root/.config/systemd/user; do
+for path in /root/.bashrc /root/.bash_profile /root/.bash_login /root/.bash_logout /root/.profile /root/.zshenv /root/.zprofile /root/.zshrc /root/.zlogin /root/.zlogout /root/.config/fish /root/.config/systemd/user; do
   [ ! -e "$path" ] || [ -L "$path" ] || printf '%s\n' "-w $path -p wa -k aegis_persistence" >> /etc/audit/rules.d/aegis-observe.rules
 done
 # Preserve the existing administrator's access while making SSH failures observable.

@@ -2,8 +2,9 @@
 import os,pathlib,re,shlex,stat,subprocess,threading,time
 
 AUTH_WATCHES=('/etc/ssh/sshd_config','/etc/ssh/sshd_config.d','/etc/pam.d','/etc/security/access.conf')
-from persistence import LOG_CONFIG_FILES,LOG_CONFIG_DIRS
+from persistence import LOG_CONFIG_FILES,LOG_CONFIG_DIRS,GLOBAL_STARTUP_FILES,GLOBAL_STARTUP_DIRS
 LOG_WATCHES=LOG_CONFIG_FILES+LOG_CONFIG_DIRS
+SHELL_WATCHES=GLOBAL_STARTUP_FILES+GLOBAL_STARTUP_DIRS
 
 CATALOG=(
  ('Nginx',('nginx.service',),('/var/log/nginx/access.log','/var/log/nginx/error.log'),'Access logs can use the access adapter; error logs need a supported structured export.'),
@@ -38,17 +39,19 @@ def inventory():
             if fields.get('Id') in units:services[fields['Id']]=fields
     rules=command(['auditctl','-l'])
     keys=None if rules is None else sorted(set(re.findall(r'(?:-k\s+|key=)"?([A-Za-z0-9_-]+)',rules)))
-    watches=None
+    watches=None;shell_watches=None
     if rules is not None:
         watches={path:False for path in (*AUTH_WATCHES,*LOG_WATCHES)}
+        shell_watches={path:False for path in SHELL_WATCHES}
         try:
             for line in rules.splitlines():
                 args=shlex.split(line)
                 if '-w' not in args or '-p' not in args or '-k' not in args:continue
                 path=args[args.index('-w')+1];perms=args[args.index('-p')+1];key=args[args.index('-k')+1]
                 if path in watches and key=='aegis_identity' and set('wa')<=set(perms):watches[path]=True
-        except (ValueError,IndexError):watches=None
-    return dict(services=services,services_available=raw is not None and bool(services),rules=keys,identity_watches=watches)
+                if path in shell_watches and key=='aegis_persistence' and set('wa')<=set(perms):shell_watches[path]=True
+        except (ValueError,IndexError):watches=None;shell_watches=None
+    return dict(services=services,services_available=raw is not None and bool(services),rules=keys,identity_watches=watches,shell_watches=shell_watches)
 
 def assess(config,health,facts,inspect=metadata,now=None):
     now=time.time() if now is None else now;rows=[]
@@ -75,12 +78,18 @@ def assess(config,health,facts,inspect=metadata,now=None):
     if not config.get('persistence_enabled',False):
         add('Authentication configuration watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
         add('Logging configuration watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
+        add('Global shell startup watches','DISABLED','persistence_enabled is false','Enable the file-change sensor after reviewing its scope.')
     else:
         watches=facts.get('identity_watches')
         for path in (*AUTH_WATCHES,*LOG_WATCHES):
             kind=inspect(path).get('kind','unknown')
             status=('MISSING' if kind=='missing' else 'UNSAFE' if kind=='unsafe' else 'UNKNOWN' if kind not in ('file','directory') or watches is None else 'WATCH PRESENT' if watches.get(path) else 'RULES MISSING')
             add(('Auth watch ' if path in AUTH_WATCHES else 'Log watch ')+path,status,path,'Only the expected write/attribute watch and key are checked; audit health and actual event delivery must also be verified.' if status=='WATCH PRESENT' else 'Inspect this path and its audit rules; absent paths need a watch after they are created. Other rule forms require manual verification.')
+        shell=facts.get('shell_watches')
+        for path in SHELL_WATCHES:
+            kind=inspect(path).get('kind','unknown')
+            status=('MISSING' if kind=='missing' else 'UNSAFE' if kind=='unsafe' else 'UNKNOWN' if kind not in ('file','directory') or shell is None else 'WATCH PRESENT' if shell.get(path) else 'RULES MISSING')
+            add('Shell watch '+path,status,path,'Rule presence does not prove event delivery; absent or replaced paths can require a rule reload.')
     configured=[]
     for item in config.get('application_sources',[])[:8]:
         path=item['path'];info=inspect(path);source=sources.get('App '+item['name'],{})

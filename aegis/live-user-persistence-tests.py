@@ -30,18 +30,19 @@ def main():
         if shell is None or unit.exists():raise RuntimeError('No unused fixture path is available')
         sshdir=home/'.ssh';sshdir.mkdir(mode=0o700)
         (sshdir/'authorized_keys').write_text((root/'key.pub').read_text());cmd(['chown','-R',actor+':'+actor,str(sshdir)])
+        fish=home/'.config/fish/config.fish';fish_drop=home/'.config/fish/conf.d'/('aegis-lab-'+suffix+'.fish');ssh_rc=sshdir/'rc'
         content='# '+marker+'\n';script=root/'mutate.py';gate=root/'delete-ready'
-        script.write_text('import pathlib,time\n'+f'p=pathlib.Path({str(shell)!r});p.write_text({content!r})\n'+f'u=pathlib.Path({str(unit)!r});u.parent.mkdir(parents=True,exist_ok=True);u.write_text({content!r})\n'+f'gate=pathlib.Path({str(gate)!r})\n'+'\nwhile not gate.exists():time.sleep(.1)\np.unlink()\n');script.chmod(0o644)
+        script.write_text('import pathlib,time\n'+f'p=pathlib.Path({str(shell)!r});p.write_text({content!r})\n'+f'u=pathlib.Path({str(unit)!r});u.parent.mkdir(parents=True,exist_ok=True);u.write_text({content!r})\n'+f'paths={list(map(str,(fish,fish_drop,ssh_rc)))!r}\n'+f'\nfor raw in paths:\n pth=pathlib.Path(raw);pth.parent.mkdir(parents=True,exist_ok=True);pth.write_text({content!r})\n'+f'gate=pathlib.Path({str(gate)!r})\n'+'\nwhile not gate.exists():time.sleep(.1)\np.unlink()\n');script.chmod(0o644)
         prefix=['ssh','-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=3','-i',str(root/'key'),actor+'@127.0.0.1']
         process=subprocess.Popen(prefix+['python3 '+shlex.quote(str(script))+' && sleep 45'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
-        paths={str(shell):'shell_startup',str(unit):'systemd_user'}
+        paths={str(shell):'shell_startup',str(unit):'systemd_user',str(fish):'shell_startup',str(fish_drop):'shell_startup',str(ssh_rc):'ssh_user_rc'}
         def recorded():
             if process.poll() is not None:raise RuntimeError('SSH test process ended before the file changes: '+process.stderr.read()[:400])
             rows=query("SELECT subject,details_json FROM correlation_events WHERE kind='persistence_change' AND event_time>=?",(started,))
             matched=[(subject,json.loads(details)) for subject,details in rows if subject in paths]
             return matched if {subject for subject,_ in matched}==set(paths) else None
         rows=wait(recorded)
-        check('Real SSH user writes both watched persistence locations',process.poll() is None and len(rows)>=2)
+        check('Real SSH user writes five watched persistence locations',process.poll() is None and len(rows)>=5)
         check('Audit metadata identifies user and mechanism',all(details.get('mechanism')==paths[subject] and details.get('auid')==str(account.pw_uid) for subject,details in rows))
         def linked():
             found={}
@@ -51,7 +52,7 @@ def main():
                 if {'persistence_change','ssh_session_open'}<=kinds:found[subject]=evidence
             return found if set(found)==set(paths) else None
         evidence=wait(linked)
-        check('Both changes link to the audited SSH session',all(any(edge.get('relation')=='exact_audit_session_attribution_not_causal' for edge in item['edges']) for item in evidence.values()))
+        check('All changes link to the audited SSH session',all(any(edge.get('relation')=='exact_audit_session_attribution_not_causal' for edge in item['edges']) for item in evidence.values()))
         check('Standalone changes authorize no action',all(not item['allowed_actions'] for item in evidence.values()))
         check('Fixture file contents are absent from evidence',marker not in json.dumps(evidence))
         gate.touch()

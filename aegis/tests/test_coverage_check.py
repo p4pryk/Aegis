@@ -85,7 +85,7 @@ class Coverage(unittest.TestCase):
             for p in (fifo,link):self.assertEqual(coverage.metadata(p)['kind'],'unsafe')
     def test_collector_gaps_remain_review_items(self):
         self.health['sources'][0]['status']='GAP'
-        report=self.assess();self.assertEqual(report['gaps'],3)
+        report=self.assess();self.assertEqual(report['gaps'],4)
         self.assertTrue(any(getattr(line,'level',None)=='warning' and '[GAP]' in line for line in coverage.lines(report,104,100)))
     def test_source_screen_safely_renders_report(self):
         report=self.assess();report['rows'][0]['name']='test\x1b[2J'
@@ -103,5 +103,14 @@ class Coverage(unittest.TestCase):
         self.assertEqual(rows['Log watch /etc/audit/rules.d'],'WATCH PRESENT')
         self.assertEqual(rows['Log watch /etc/rsyslog.d'],'RULES MISSING')
         self.assertEqual(rows['Log watch /etc/audit/auditd.conf'],'MISSING')
+
+    def test_shell_startup_watch_inventory_respects_key_and_permissions(self):
+        rules='-w /etc/profile.d -p wa -k aegis_persistence\n-w /etc/profile -p w -k aegis_persistence'
+        with patch.object(coverage,'command',side_effect=['Id=sshd.service\nLoadState=loaded\nActiveState=active\n',rules]):facts=coverage.inventory()
+        self.facts.update(facts)
+        files={'/etc/profile.d':{'kind':'directory'},'/etc/profile':{'kind':'file'}}
+        rows={r['name']:r['status'] for r in self.assess({'persistence_enabled':True},files)['rows']}
+        self.assertEqual(rows['Shell watch /etc/profile.d'],'WATCH PRESENT')
+        self.assertEqual(rows['Shell watch /etc/profile'],'RULES MISSING')
 
 if __name__=='__main__':unittest.main()

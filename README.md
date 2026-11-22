@@ -109,7 +109,7 @@ This is a **bounded set of default and configured sources**, not a claim to insp
 
 An SSH case reports **possible password spraying** when its bounded evidence contains failed attempts for at least five distinct account names from the same IP within 120 seconds. Up to 31 representative account failures are carried from the last 256 matching records into a new case, preserving context across case boundaries and restarts. Full cases roll over instead of silently dropping subsequent failures. The signal is displayed in the terminal and included as untrusted context for model assessment. Shared addresses and legitimate activity can produce the same pattern; the signal does not prove compromise or authorize a block. This bounded, source-IP-based detector does not cover every slow or distributed spray.
 
-The user-persistence scope includes `.bashrc`, `.bash_profile`, `.profile`, `.zshrc` and bounded `.config/systemd/user` service, timer and drop-in paths under `/home/<user>` and `/root`. The existing `/home` audit watch covers ordinary homes on the same watched filesystem; nested mounts and custom home paths need separate audit configuration. Root paths are watched only when present and not symlinks at installation, and may need the rules reloaded after creation or replacement. These changes can be legitimate; events contain metadata, not file contents, and standalone changes do not authorize quarantine.
+The user-persistence scope includes selected Bash and Zsh startup files, fish `config.fish` and direct `conf.d/*.fish` files, `~/.ssh/rc`, and bounded `.config/systemd/user` service, timer and drop-in paths under `/home/<user>` and `/root`. Selected system-wide startup locations include `/etc/environment`, `/etc/profile`, `/etc/profile.d/*.sh`, Bash and Zsh configuration files, and fish configuration. The existing `/home` audit watch covers ordinary homes on the same watched filesystem; nested mounts and custom home paths need separate audit configuration. Root and global paths receive individual watches only when present and not symlinks at installation, and may need the rules reloaded after creation or replacement. Source Health lists expected global shell watches. These changes can be legitimate; events contain metadata, not file contents, and standalone changes do not authorize quarantine.
 
 Audit path records marked `DELETE` for these persistence locations also create review-only cases. An audit path record may describe a rename or replacement; it does not prove the path is currently absent. Deletion records cannot alone establish a persistence-creation chain or authorize quarantine.
 
@@ -441,6 +441,12 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-22 — Expand shell and SSH startup telemetry
+
+- Observe selected additional Bash and Zsh startup files, fish configuration and direct `conf.d` scripts, user `~/.ssh/rc`, and selected system-wide shell startup locations. Existing paths receive bounded audit watches; missing or replaced paths may need a rule reload. No file contents or automatic containment are added.
+- Show expected global shell-startup watches in Source Health with explicit missing, unsafe and unrecognized states; watch presence does not prove event delivery.
+- Validation on the Azure Linux VM: all 350 tests and 11 live checks passed, including an SSH user writing five watched locations and a separate inert `/etc/profile.d` fixture under a temporary kernel watch. Installed modules matched the tested source. Installer watch-generation logic was exercised against the real filesystem; the full installer lifecycle was not run for this iteration. Locally 342 tests passed and eight Linux/root-only tests were skipped.
 
 ### 2026-11-22 — Correlate application login sequences
 

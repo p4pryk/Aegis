@@ -4,16 +4,23 @@ import hashlib,json,os,pathlib,posixpath,re,stat,time
 QUARANTINE = pathlib.Path('/var/lib/defense-agent/quarantine')
 LOG_CONFIG_FILES=('/etc/audit/auditd.conf','/etc/audit/audit.rules','/etc/systemd/journald.conf','/etc/rsyslog.conf')
 LOG_CONFIG_DIRS=('/etc/audit/rules.d','/etc/audit/plugins.d','/etc/systemd/journald.conf.d','/etc/rsyslog.d')
+GLOBAL_STARTUP_FILES=('/etc/environment','/etc/profile','/etc/bash.bashrc','/etc/zsh/zshenv','/etc/zsh/zprofile','/etc/zsh/zshrc','/etc/zsh/zlogin','/etc/zsh/zlogout','/etc/fish/config.fish')
+GLOBAL_STARTUP_DIRS=('/etc/profile.d','/etc/fish/conf.d')
+USER_STARTUP_FILES=('.bashrc','.bash_profile','.bash_login','.bash_logout','.profile','.zshenv','.zprofile','.zshrc','.zlogin','.zlogout')
 
 def scope(path):
     p=pathlib.PurePosixPath(path)
     if not p.is_absolute() or '..' in p.parts:return None
+    p=pathlib.PurePosixPath('/'+path.lstrip('/'))
     if p.name=='authorized_keys' and p.parent.name=='.ssh':return 'ssh_key'
+    if p.name=='rc' and p.parent.name=='.ssh':return 'ssh_user_rc'
+    if str(p) in GLOBAL_STARTUP_FILES or (str(p.parent)=='/etc/profile.d' and p.suffix=='.sh') or (str(p.parent)=='/etc/fish/conf.d' and p.suffix=='.fish'):return 'shell_startup'
     parts=None
     if len(p.parts)>1 and p.parts[1]=='root':parts=p.parts[2:]
     elif len(p.parts)>2 and p.parts[1]=='home':parts=p.parts[3:]
     if parts is not None:
-        if len(parts)==1 and parts[0] in ('.bashrc','.bash_profile','.profile','.zshrc'):return 'shell_startup'
+        if len(parts)==1 and parts[0] in USER_STARTUP_FILES:return 'shell_startup'
+        if parts==('.config','fish','config.fish') or (parts[:3]==('.config','fish','conf.d') and len(parts)==4 and p.suffix=='.fish'):return 'shell_startup'
         if parts[:3]==('.config','systemd','user') and 4<=len(parts)<=6 and p.suffix in ('.service','.timer','.conf'):return 'systemd_user'
     if str(p)=='/etc/crontab' or str(p.parent) in ('/etc/cron.d','/etc/cron.hourly','/etc/cron.daily','/etc/cron.weekly','/etc/cron.monthly','/var/spool/cron/crontabs'):return 'cron'
     if '/'.join(p.parts[1:4])=='etc/systemd/system' and len(p.parts)<=6 and p.suffix in ('.service','.timer','.conf'):return 'systemd'
