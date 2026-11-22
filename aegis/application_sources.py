@@ -191,7 +191,7 @@ def links(events):
             seen[key]=event
     success,failures=auth_chain(events)
     if success:
-        result.extend({'from':failure['event_id'],'to':success['event_id'],'relation':'same_reported_application_account_ip_prior_failure_not_causal'} for failure in failures)
+        result.extend({'from':failure['event_id'],'to':success['event_id'],'relation':'same_reported_application_account_ip_prior_failure_not_causal'} for failure in failures[-5:])
     return result
 
 class Applications(Files):

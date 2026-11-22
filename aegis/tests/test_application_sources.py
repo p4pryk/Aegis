@@ -156,6 +156,17 @@ class Applications(unittest.TestCase):
             self.insert(self.event('permission_changed',source=src,user='u'*128,ip='ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',request_id='r',session_id='s',method='M'*10,path='/foo',status=200,outcome='success'))
         self.assertEqual(len(self.snapshot()['events']),32)
         self.assertLess(len(agent.canonical(self.snapshot()).encode()),48000)
+    def test_full_authentication_batch_keeps_evidence_with_bounded_links(self):
+        source=dict(self.source,application='a'*64,name='b'*64);stamp=time.time()-40
+        for n in range(31):
+            event=self.event('authentication',source=source,outcome='failure' if n<30 else 'success',user='u'*128,ip='ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',request_id='r'*256,session_id='s'*256,method='M'*10,path='/'+'x'*3000,status=599)
+            event['event_id']='e'*76+f'{n:02d}';event['event_time']=stamp+n;self.insert(event)
+        snapshot=self.engine.snapshot(*self.cases()[-1])
+        self.assertEqual(len(snapshot['events']),31)
+        self.assertEqual(snapshot['signals'],[{'kind':'reported_app_success_after_failures','failure_count':30}])
+        self.assertEqual(sum(e['relation']=='same_reported_application_account_ip_prior_failure_not_causal' for e in snapshot['edges']),5)
+        self.assertLess(len(agent.canonical(snapshot).encode()),48000)
+        self.assertFalse(snapshot['allowed_actions'])
     def test_stale_future_events_never_enter_store(self):
         for delta in (-700,60):
             e=self.event('security_alert');e['event_time']+=delta;self.insert(e)
