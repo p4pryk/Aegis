@@ -811,6 +811,7 @@ class CorrelatedEngine:
         self.status(identifier,'recognized',{'version':version})
         if self.execute is not None:response.advance(self,identifier)
     def tick(self,now=None):
+        health_now=now
         now=time.time() if now is None else now
         import response
         if self.execute is not None:response.resume(self,now)
@@ -822,7 +823,7 @@ class CorrelatedEngine:
             if now-updated>=self.c.get('correlation_quiet_seconds',2) or now-created>=self.c.get('correlation_max_seconds',5):
                 evidence=canonical(self.snapshot(identifier,kind,subject,version));self.db.execute('UPDATE cases SET evidence_json=? WHERE id=?',(evidence,identifier));self.status(identifier,'awaiting_analysis',{'version':version,'snapshot_hash':hashlib.sha256(evidence.encode()).hexdigest()})
         from monitoring import model_health
-        health=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),now)
+        health=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),health_now)
         for identifier,version,evidence,updated in self.db.execute("SELECT id,version,evidence_json,updated_at FROM cases WHERE status='awaiting_analysis'").fetchall():
             reason=health['status']
             if health.get('cap',0)>0:
@@ -877,9 +878,14 @@ def serve_executor(c):
                 executor.c=load_config(c.get('_config_path','/etc/defense-agent/config.json'))
                 journal.config=executor.c
                 require_enforce(executor.c)
-                request=authorize_step(executor.c,json.loads(receive(client)))
-                if request['action']=='block_ip':executor.firewall_init()
-                result=journal.record(executor,request);reply={'ok':True,'result':result}
+                context=json.loads(receive(client))
+                request=authorize_step(executor.c,context,revalidate=False)
+                result=journal.recover(context,request)
+                if result is None:
+                    request=authorize_step(executor.c,context)
+                    if request['action']=='block_ip':executor.firewall_init()
+                    result=journal.record(executor,request,context=context)
+                reply={'ok':True,'result':result}
             except Exception as e:reply={'ok':False,'error':str(e)[:500]}
             try:client.send(json.dumps(reply).encode())
             except OSError:pass  # The caller may restart after the action already completed.
@@ -980,7 +986,7 @@ def serve_core(c):
                 response_pending=store.db.execute("SELECT count(*) FROM cases WHERE status='recognized'").fetchone()[0]
                 health={'time':last_health,'pid':os.getpid(),'journal':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH),'journal_queue_depth':events.qsize(),'journal_oldest_seconds':journal_age,'response_pending':response_pending,'audit':audit_health,'audit_spool':spool.health(),**meter.snapshot()}
                 from monitoring import source_states,model_health
-                store.state('model_health',model_health(c.get('ai_results_dir','/var/lib/defense-agent-ai'),last_health))
+                store.state('model_health',model_health(c.get('ai_results_dir','/var/lib/defense-agent-ai')))
                 health['sources']=source_states(engine,spool,{'ssh':dict(JOURNAL_HEALTH),'journal_context':dict(JOURNAL_CONTEXT_HEALTH)},pending_sources,last_health,audit_health)
                 if files:
                     health['sources']=[dict(source,status='DISABLED',reason='System log files selected; journal authentication is not consumed') if source['name']=='SSH journal' else source for source in health['sources']]

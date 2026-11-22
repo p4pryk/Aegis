@@ -46,6 +46,9 @@ def sample(db, now=None):
 def continuous(item, previous):
     if not item['core_alive'] or not item['sensor_alive'] or item['unhealthy_sources']:return False
     if previous is None:return True
+    # A paused or stalled observer cannot establish continuous coverage merely
+    # because the collector appears healthy when sampling resumes.
+    if not 0 <= item['time']-previous['time'] <= 15:return False
     if (item['boot_id'],item['core_pid'])!=(previous['boot_id'],previous['core_pid']):return False
     return all(item[key]==previous[key] for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'))
 

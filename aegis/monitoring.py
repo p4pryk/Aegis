@@ -89,7 +89,7 @@ def source_states(engine,spool,journals,pending,now,kernel_status=None):
     legacy=engine.store.state('persistence_incomplete') or engine.store.state('persistence_overload')
     assembly_loss=engine.c.get('persistence_enabled',False) and bool(assembly or legacy)
     total,reviewed,unresolved=audit_parse_counts(engine.store.state('audit_parse_error'),engine.store.state('audit_parse_ack'))
-    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or int(kernel.get('lost',0)) or assembly_loss or unresolved), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; audit parse errors: {total if total is not None else 'unknown'}; reviewed: {reviewed}; file audit assembly gap: {'recorded' if assembly_loss else 'none'}; check audit history")
+    add('Kernel audit',True,alive,health.get('last_received_at'),health['rows'],health['oldest_seconds'],bool(health.get('dropped') or health.get('io_error_at') or health.get('io_error_pending') or int(kernel.get('lost',0)) or assembly_loss or unresolved), 'Audit producer stopped, unavailable, or kernel audit disabled',issue=f"Kernel lost: {kernel.get('lost',0)}; inbox rejected: {health.get('dropped',0)}; I/O loss: {'recorded or pending' if health.get('io_error_at') or health.get('io_error_pending') else 'none'}; audit parse errors: {total if total is not None else 'unknown'}; reviewed: {reviewed}; file audit assembly gap: {'recorded' if assembly_loss else 'none'}; check audit history")
     sources[-1].update(audit_parse_errors=total,audit_parse_reviewed=reviewed)
     journal_active=service_active('systemd-journald.service')
     for key,name in (('ssh','SSH journal'),('journal_context','Service journal')):
@@ -115,13 +115,15 @@ def visible_sources(data,now):
 def model_health(directory,now=None):
     """Read bounded worker diagnostics; never use them to authorize a response."""
     import json,pathlib,math,os,stat
-    now=time.time() if now is None else now
     try:
         fd=os.open(pathlib.Path(directory)/'heartbeat.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
         with os.fdopen(fd) as stream:
             info=os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size>16384:raise ValueError('invalid heartbeat file')
             data=json.loads(stream.read(16385))
+        # The worker may refresh the file while we read it. Sample the clock
+        # afterwards so a fresh heartbeat is not mistaken for a future one.
+        now=time.time() if now is None else now
         stamp=data['time']
         if type(stamp) not in (int,float) or not 0<=now-stamp<45:raise ValueError('stale')
         statuses=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE')
@@ -132,4 +134,4 @@ def model_health(directory,now=None):
             if type(value) not in (int,float) or not math.isfinite(value) or value<0:raise ValueError('invalid counter')
             result[key]=value
         return result
-    except (OSError,ValueError,TypeError,KeyError):return {'time':now,'status':'MODEL UNAVAILABLE'}
+    except (OSError,ValueError,TypeError,KeyError):return {'time':time.time() if now is None else now,'status':'MODEL UNAVAILABLE'}

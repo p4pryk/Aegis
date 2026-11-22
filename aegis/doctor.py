@@ -6,7 +6,6 @@ import pathlib
 import re
 import sqlite3
 import time
-from urllib.parse import urlsplit
 
 import agent
 import ai_worker
@@ -17,6 +16,7 @@ import system_sources
 
 def diagnose(config_path,model_path,database_path,now=None):
     checks=[]
+    config=None
     def add(name,status,detail):checks.append({'name':name,'status':status,'detail':detail})
     try:
         config=agent.load_config(config_path)
@@ -27,10 +27,12 @@ def diagnose(config_path,model_path,database_path,now=None):
     try:
         raw=pathlib.Path(model_path).read_text();model=json.loads(raw)
         if not isinstance(model,dict):raise ValueError('invalid')
-        endpoint=urlsplit(model.get('endpoint',''));deployment=model.get('deployment')
-        if endpoint.scheme!='https' or not endpoint.hostname or endpoint.username or endpoint.password or not isinstance(deployment,str) or not deployment.strip():raise ValueError('invalid')
+        ai_worker.model_endpoint(model)
         ai_worker.limits(model)
-        add('Model configuration','OK','Configured; connectivity and model access were not tested.')
+        model_db=ai_worker.model_database(model)
+        if config is not None and pathlib.PurePosixPath(model_db)!=pathlib.PurePosixPath(config['data_dir'])/'incidents.db':
+            add('Model configuration','WARN','Model and collector database paths differ; assessments will not follow the collector.')
+        else:add('Model configuration','OK','Configured; connectivity and model access were not tested.')
     except FileNotFoundError:
         add('Model configuration','WARN','Not configured; collection can continue without model assessments.')
     except (OSError,ValueError,TypeError,KeyError):

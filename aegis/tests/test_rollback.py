@@ -89,6 +89,61 @@ class Rollback(unittest.TestCase):
         result=self.j.record(self.executor,{'action':'block_ip','ip':'::ffff:198.51.100.44'})
         self.assertEqual(self.j.read(result['undo_receipt'])['target'],'198.51.100.44')
 
+    def test_lost_acknowledgement_reconciles_same_bound_step_without_repeating_action(self):
+        context={'case_id':'a'*24,'version':1,'position':0}
+        request={'action':'block_ip','ip':'198.51.100.44','expires_at':time.time()+60}
+        first=self.j.record(self.executor,request,context=context)
+        recovered=self.j.recover(context,request)
+        self.assertTrue(recovered['verified']);self.assertTrue(recovered['reconciled'])
+        self.assertEqual(recovered['undo_receipt'],first['undo_receipt'])
+        self.assertEqual(self.j.record(self.executor,request,context=context)['undo_receipt'],first['undo_receipt'])
+        self.assertEqual(self.executor.execute.call_count,1)
+        binding,_=self.j.binding(context,request)
+        self.assertEqual(binding.stat().st_mode&0o777,0o600)
+
+    def test_binding_rejects_changed_request_and_unknown_outcome_without_retry(self):
+        context={'case_id':'b'*24,'version':1,'position':0}
+        request={'action':'block_ip','ip':'198.51.100.44','expires_at':time.time()+60}
+        first=self.j.record(self.executor,request,context=context)
+        with self.assertRaisesRegex(ValueError,'binding changed'):
+            self.j.recover(context,dict(request,ip='198.51.100.45'))
+        receipt=self.j.read(first['undo_receipt']);receipt['state']='prepared';self.j.save(receipt)
+        with self.assertRaisesRegex(ValueError,'uncertain'):
+            self.j.record(self.executor,request,context=context)
+        self.assertEqual(self.executor.execute.call_count,1)
+
+    def test_changed_or_expired_effect_is_not_reported_as_recovered(self):
+        context={'case_id':'c'*24,'version':1,'position':0}
+        request={'action':'block_ip','ip':'198.51.100.44','expires_at':time.time()+60}
+        self.j.record(self.executor,request,context=context)
+        self.network={'comment':'other-owner'}
+        with self.assertRaisesRegex(ValueError,'ownership'):self.j.recover(context,request)
+        self.network=None
+        with self.assertRaisesRegex(ValueError,'absent or expired'):self.j.recover(context,request)
+        self.assertEqual(self.executor.execute.call_count,1)
+
+    def test_terminated_session_can_be_reconciled_only_if_it_stays_closed(self):
+        context={'case_id':'d'*24,'version':1,'position':1}
+        request={'action':'terminate_session','boot_id':'boot','session':42,'auid':1002,'user':'lab_actor'}
+        self.executor.execute.side_effect=None;self.executor.execute.return_value={'verified':True,'session':42}
+        self.j.record(self.executor,request,context=context)
+        with patch('agent.audit_processes',return_value=[]):self.assertTrue(self.j.recover(context,request)['reconciled'])
+        with patch('agent.audit_processes',return_value=[{'pid':123}]):
+            with self.assertRaisesRegex(ValueError,'outcome changed'):self.j.recover(context,request)
+        self.assertEqual(self.executor.execute.call_count,1)
+
+    def test_app_session_reconciliation_is_read_only_and_requires_verified_revocation(self):
+        context={'case_id':'e'*24,'version':1,'position':1}
+        request={'action':'revoke_app_session','session':'a'*32}
+        self.executor.execute.side_effect=None;self.executor.execute.return_value={'verified':True,'revoked':True}
+        self.j.record(self.executor,request,context=context)
+        with patch('vulnerable_app.rpc',return_value={'verified':True,'revoked':True}) as rpc:
+            self.assertTrue(self.j.recover(context,request)['reconciled'])
+            rpc.assert_called_once_with({'op':'session_status','session':'a'*32})
+        with patch('vulnerable_app.rpc',return_value={'verified':False,'revoked':False}):
+            with self.assertRaisesRegex(ValueError,'cannot be verified'):self.j.recover(context,request)
+        self.assertEqual(self.executor.execute.call_count,1)
+
 
 class FirewallFormat(unittest.TestCase):
     def test_nft_list_set_json_distinguishes_ownership_and_absence(self):

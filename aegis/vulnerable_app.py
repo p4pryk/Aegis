@@ -25,10 +25,11 @@ def broker():
             client.settimeout(3)
             try:
                 peer_pid,uid,_=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12));raw=client.recv(8192);d=json.loads(raw);op=d.get('op')
-                if op=='revoke':
+                if op in ('revoke','session_status'):
                     if uid!=0 or not re.fullmatch('[a-f0-9]{32}',d.get('session','')):raise ValueError('Unauthorized response')
-                    db.execute('UPDATE sessions SET revoked=1 WHERE id=?',(d['session'],));db.commit();row=db.execute('SELECT revoked FROM sessions WHERE id=?',(d['session'],)).fetchone()
-                    result={'verified':bool(row and row[0]==1),'revoked':True}
+                    if op=='revoke':db.execute('UPDATE sessions SET revoked=1 WHERE id=?',(d['session'],));db.commit()
+                    row=db.execute('SELECT revoked FROM sessions WHERE id=?',(d['session'],)).fetchone()
+                    result={'verified':bool(row and row[0]==1),'revoked':bool(row and row[0]==1)}
                 else:
                     if uid!=pwd.getpwnam('aegis-target').pw_uid:raise ValueError('Unauthorized collector')
                     groups=pathlib.Path(f'/proc/{peer_pid}/cgroup').read_text()

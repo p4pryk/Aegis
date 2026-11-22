@@ -20,7 +20,7 @@ def read(query,args=()):
 def restart():subprocess.run(['systemctl','restart','defense-agent'],check=True,timeout=25)
 config_path=pathlib.Path('/etc/defense-agent/config.json');original=config_path.read_bytes()
 app='adapter-check-'+str(int(time.time()));start=time.time();session=secrets.token_hex(24);created=set()
-with tempfile.TemporaryDirectory(prefix='aegis-independent-app-') as directory:
+with tempfile.TemporaryDirectory(prefix='aegis-independent-app-',dir='/var/log') as directory:
     root=pathlib.Path(directory);paths={key:root/(key+'.log') for key in ('backend','gateway','access')}
     for path in paths.values():path.touch(mode=0o600)
     def append(key,record):

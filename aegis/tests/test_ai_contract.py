@@ -10,7 +10,7 @@ class ModelCatalog(unittest.TestCase):
   output={'summary':'Opis sesji i zmiany.','uncertainty':'Brak dowodu kradzieży hasła.','next_step':'Ograniczyć sesję.','attack':True,'confidence':.9,'evidence_ids':['proof'],'proposed_action_ids':ids}
   response=MagicMock();response.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(output)}}]}).encode()
   row={'id':'case','kind':'ssh_session_account','version':1,'evidence_json':json.dumps(evidence)}
-  with patch.object(w,'token',return_value='fake'),patch.object(w.urllib.request,'urlopen',return_value=response):
+  with patch.object(w,'token',return_value='fake'),patch.object(w,'open_model',return_value=response):
    return w.analyze(row,{'deployment':'test','endpoint':'https://example.invalid'})
  def test_model_selects_id_root_parameters_remain_exact(self):
   r=self.run_analysis(['a0']);a=r['analysis']['proposed_actions'][0]

@@ -6,7 +6,7 @@ import agent,audit_spool,monitoring,console,app_correlation,maintenance
 class SourceHealth(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.c=dict(agent.DEFAULTS,data_dir=self.temp.name,audit_spool_dir=self.temp.name+'/audit',application_enabled=True,application_log=self.temp.name+'/application.jsonl')
+        self.c=dict(agent.DEFAULTS,data_dir=self.temp.name,audit_spool_dir=self.temp.name+'/audit',runtime_dir=self.temp.name+'/run',application_enabled=True,application_log=self.temp.name+'/application.jsonl')
         self.store=agent.Store(self.c);self.addCleanup(self.store.db.close)
         self.e=agent.CorrelatedEngine(self.c,self.store,None);self.spool=audit_spool.Spool(self.c);self.addCleanup(self.spool.db.close)
         (self.spool.path.parent/'producer.json').write_text(json.dumps({'boot_id':self.e.boot_id,'pid':123,'start_ticks':12}))
@@ -47,6 +47,33 @@ class SourceHealth(unittest.TestCase):
         self.assertEqual(row['status'],'GAP');self.assertIn('audit parse errors: 2',row['reason'])
         self.e=agent.CorrelatedEngine(self.c,self.store,None)
         self.assertEqual(self.states()[0]['status'],'GAP')
+
+    def test_disk_error_is_visible_until_and_after_durable_recovery(self):
+        import sqlite3
+        marker=self.spool.loss_marker
+        audit_spool.mark_io_loss(marker)
+        self.assertTrue(self.spool.health()['io_error_pending'])
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        class FullDatabase:
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def execute(self,*args):raise sqlite3.OperationalError('disk full')
+            def rollback(self):pass
+        with patch.object(self.spool,'db',FullDatabase()):
+            self.assertFalse(audit_spool.persist_io_loss(self.spool))
+        self.assertTrue(marker.exists())
+        self.assertTrue(audit_spool.persist_io_loss(self.spool))
+        self.assertFalse(marker.exists())
+        self.assertTrue(self.spool.health()['io_error_at'])
+        self.assertEqual(self.states()[0]['status'],'GAP')
+
+    def test_unsafe_runtime_loss_marker_is_not_followed(self):
+        marker=self.spool.loss_marker;marker.parent.mkdir()
+        target=marker.parent/'target';target.write_text('untouched');marker.symlink_to(target)
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        with self.assertRaises(ValueError):audit_spool.mark_io_loss(marker)
+        with self.assertRaises(ValueError):audit_spool.persist_io_loss(self.spool)
+        self.assertEqual(target.read_text(),'untouched')
 
     def test_reviewed_parse_gap_remains_visible_and_new_error_reopens_gap(self):
         self.store.state('audit_parse_error',{'time':self.now-30,'error':'ValueError','count':2,'last_record_id':17})

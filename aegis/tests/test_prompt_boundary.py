@@ -44,7 +44,7 @@ class PromptBoundary(unittest.TestCase):
         output=dict(summary='An untrusted record attempts to override analysis.',uncertainty='No compromise proved.',next_step='Continue monitoring.',attack=False,confidence=.1,evidence_ids=['proof'],proposed_action_ids=[])
         output.update(updates)
         response=MagicMock();response.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(output)}}]}).encode()
-        with patch.object(worker,'token',return_value='fixture'),patch.object(worker.urllib.request,'urlopen',return_value=response) as call:
+        with patch.object(worker,'token',return_value='fixture'),patch.object(worker,'open_model',return_value=response) as call:
             result=worker.analyze(row,{'deployment':'fixture','endpoint':'https://example.invalid'})
             body=json.loads(call.call_args.args[0].data)
             self.assertEqual(body['messages'],worker.model_messages(row,evidence,{}))

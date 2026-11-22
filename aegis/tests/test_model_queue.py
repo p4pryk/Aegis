@@ -32,6 +32,25 @@ class Queue(unittest.TestCase):
         self.assertEqual(self.model.call_args.args[0]['id'],'urgent')
         self.assertEqual(self.saved()['calls'],1)
 
+    def test_configured_database_path_and_uri_characters(self):
+        self.assertEqual(w.model_database({}),'/var/lib/defense-agent/incidents.db')
+        for value in ('relative.db','/var/../etc/passwd','/tmp/a\x00b',None):
+            with self.subTest(value=value),self.assertRaises(ValueError):w.model_database({'database_path':value})
+        unusual=self.root/'queue?fixture.db'
+        with closing(sqlite3.connect(unusual)) as db:
+            db.execute('CREATE TABLE cases(id TEXT, version INTEGER, evidence_json TEXT, status TEXT, updated_at REAL)')
+            db.execute('INSERT INTO cases VALUES(?,1,?,?,?)',('special',json.dumps({'allowed_actions':[],'policy':{}}),'awaiting_analysis',self.now))
+            db.commit()
+        with patch.object(w,'DB',w.model_database({'database_path':str(unusual)})):
+            w.cycle(self.cfg)
+        self.assertEqual(self.model.call_args.args[0]['id'],'special')
+
+    def test_worker_starts_with_configured_database(self):
+        config=self.root/'ai.json';config.write_text(json.dumps({'endpoint':'https://example.invalid','deployment':'fixture','database_path':str(self.db)}))
+        with patch.object(w,'CONFIG',str(config)),patch.object(w,'cycle',side_effect=SystemExit):
+            with self.assertRaises(SystemExit):w.main()
+        self.assertEqual(w.DB,str(self.db))
+
     def test_reserve_holds_routine_but_accepts_response_chain(self):
         self.row();self.state(30);w.cycle(self.cfg)
         self.model.assert_not_called();self.assertEqual(self.health()['status'],'RESPONSE BUDGET RESERVED')
@@ -88,11 +107,29 @@ class Queue(unittest.TestCase):
             return {'status':'complete'}
         self.model.side_effect=request;w.cycle(self.cfg)
 
+    def test_worker_writes_private_results_and_refuses_temporary_symlink(self):
+        path=self.root/'result.json';w.write(path,{'ok':True},durable=True)
+        self.assertEqual(path.stat().st_mode&0o777,0o600)
+        target=self.root/'unrelated';target.write_text('unchanged')
+        (self.root/'result.tmp').symlink_to(target)
+        with self.assertRaises(OSError):w.write(path,{'ok':False})
+        self.assertEqual(target.read_text(),'unchanged')
+
     def test_health_rejects_fifo_and_symlink(self):
         path=self.root/'heartbeat.json';os.mkfifo(path)
         self.assertEqual(self.health()['status'],'MODEL UNAVAILABLE')
         path.unlink();path.symlink_to(self.db)
         self.assertEqual(self.health()['status'],'MODEL UNAVAILABLE')
+
+    def test_health_samples_clock_after_reading_concurrent_heartbeat(self):
+        path=self.root/'heartbeat.json';path.write_text(json.dumps({'time':self.now+.1,'status':'IDLE'}))
+        events=[];decode=json.loads
+        def load(raw):events.append('read');return decode(raw)
+        def clock():events.append('clock');return self.now+.2
+        with patch.object(json,'loads',side_effect=load),patch.object(monitoring.time,'time',side_effect=clock):
+            self.assertEqual(monitoring.model_health(self.root)['status'],'IDLE')
+        self.assertEqual(events,['read','clock'])
+        self.assertEqual(monitoring.model_health(self.root,self.now)['status'],'MODEL UNAVAILABLE')
 
     def test_retry_limit_survives_hour_rollover(self):
         self.row();self.state()

@@ -56,3 +56,12 @@ class Doctor(unittest.TestCase):
         self.model.write_text(json.dumps({'endpoint':'http://example.invalid','deployment':'example'}))
         result=self.run_doctor();self.assertFalse(result['healthy'])
         self.assertEqual(next(c['status'] for c in result['checks'] if c['name']=='Model configuration'),'UNKNOWN')
+
+    def test_model_and_collector_database_mismatch_is_reported(self):
+        config=json.loads(self.config.read_text());config['data_dir']='/var/lib/custom-aegis';self.config.write_text(json.dumps(config))
+        check=next(c for c in self.run_doctor()['checks'] if c['name']=='Model configuration')
+        self.assertEqual(check['status'],'WARN')
+        self.assertIn('paths differ',check['detail'])
+        model=json.loads(self.model.read_text());model['database_path']='/var/lib/custom-aegis/incidents.db';self.model.write_text(json.dumps(model))
+        check=next(c for c in self.run_doctor()['checks'] if c['name']=='Model configuration')
+        self.assertEqual(check['status'],'OK')

@@ -15,7 +15,7 @@ def policy_hash(config):
     return hashlib.sha256(encode(config).encode()).hexdigest()
 
 
-def authorize_step(config, envelope):
+def authorize_step(config, envelope, revalidate=True):
     """Resolve a committed intent at the privileged boundary; never accept caller actions."""
     from policy import require_enforce
     from agent import CorrelatedEngine, safe_ip
@@ -58,7 +58,7 @@ def authorize_step(config, envelope):
             account=next((e for e in evidence.get('events',[]) if e.get('kind')=='account_created' and e.get('subject')==action.get('user')),None)
             if not account or request.get('expected_uid')!=account.get('details',{}).get('account_uid'):
                 raise ValueError('Account identity differs from evidence')
-        if position==0:
+        if position==0 and revalidate:
             # Recompute the local chain at the privileged boundary before any effect.
             checker=object.__new__(CorrelatedEngine);checker.c=config;checker.db=db;checker.boot_id=boot
             fresh=checker.snapshot(identifier,row[2],row[10],version)

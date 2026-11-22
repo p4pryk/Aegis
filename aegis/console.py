@@ -174,7 +174,7 @@ def render(data,width=104,height=32,mode='both',paused=False,error=None,now=None
     spool=health.get('audit_spool',{});storage=data.get('storage_health',{});worker=data.get('response_worker',{})
     worker_status='ONLINE' if worker.get('status')!='stopped' and 0<=now-worker.get('time',0)<40 else 'CHECK WORKER'
     warning=' [! STORAGE PRESSURE]' if storage.get('pressure') else ''
-    warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') else ''
+    warning+=' [! AUDIT LOSS]' if spool.get('dropped',0) or spool.get('io_error_at') or spool.get('io_error_pending') else ''
     lines.append(fit(f"Audit + journal: {health.get('records_per_second',0)} records/s | Audit pending: {spool.get('rows','--')} | Oldest: {spool.get('oldest_seconds',0):.1f}s | Lost: {spool.get('dropped','--')}"+warning,width))
     lines.append(fit(f"Core p95: {health.get('loop_p95_ms',0):.1f}ms | Journal pending: {health.get('journal_queue_depth',0)} ({health.get('journal_oldest_seconds',0):.1f}s) | Response: {worker_status}/{health.get('response_pending',0)} | DB: {storage.get('database_used_bytes',0)/1048576:.1f} MiB",width))
     lines.append(fit('Response policy: '+str(heartbeat.get('response_mode','unknown')).upper()+' | Missing model assessment always holds containment',width))

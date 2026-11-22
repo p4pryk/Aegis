@@ -4,7 +4,9 @@ import json
 import os
 import pathlib
 import re
+import select
 import sqlite3
+import stat
 import time
 import uuid
 
@@ -20,6 +22,7 @@ class Spool:
         self.limit = int(config.get('audit_spool_bytes', 16*1024*1024))
         self.row_limit = int(config.get('audit_spool_records', 50000))
         self.path = pathlib.Path(config.get('audit_spool_dir', '/var/lib/defense-agent-audit')) / 'inbox.db'
+        self.loss_marker = pathlib.Path(config.get('runtime_dir', '/run/defense-agent')) / 'audit-loss.pending'
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=5)
         self.db.execute('PRAGMA journal_mode=DELETE')
@@ -71,8 +74,33 @@ class Spool:
     def health(self):
         meta = dict(self.db.execute('SELECT key,value FROM meta'))
         oldest = self.db.execute('SELECT received FROM inbox ORDER BY id LIMIT 1').fetchone()
-        return {**meta, 'limit_bytes': self.limit, 'oldest_seconds': max(0, time.time()-oldest[0]) if oldest else 0,
+        return {**meta, 'io_error_pending':os.path.lexists(self.loss_marker), 'limit_bytes': self.limit, 'oldest_seconds': max(0, time.time()-oldest[0]) if oldest else 0,
                 'file_bytes': self.path.stat().st_size, 'pressure': meta['bytes'] >= .8*self.limit or meta['rows'] >= .8*self.row_limit}
+
+
+def mark_io_loss(path):
+    """Expose a pending gap independently of a full inbox filesystem."""
+    path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+    try:fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        info=path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077:raise ValueError('Unsafe pending audit-loss marker')
+        return
+    with os.fdopen(fd,'w') as marker:
+        marker.write(str(time.time()));marker.flush();os.fsync(marker.fileno())
+
+
+def persist_io_loss(spool):
+    """Keep the volatile marker until a durable inbox marker commits."""
+    if not os.path.lexists(spool.loss_marker):return True
+    info=spool.loss_marker.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077:raise ValueError('Unsafe pending audit-loss marker')
+    try:
+        with spool.db:spool.db.execute("INSERT OR REPLACE INTO meta VALUES ('io_error_at',?)",(time.time(),))
+    except sqlite3.Error:
+        spool.db.rollback();return False
+    spool.loss_marker.unlink()
+    return True
 
 
 def consume(engine, spool):
@@ -131,6 +159,9 @@ def forward(config, stream):
     pending=b''
     try:
         while True:
+            waiting_for_space=not persist_io_loss(spool)
+            ready,_,_=select.select([stream.fileno()],[],[],1 if waiting_for_space else None)
+            if not ready:continue
             chunk=os.read(stream.fileno(),65536)
             if not chunk:break
             lines=(pending+chunk).split(b'\n');pending=lines.pop()
@@ -148,10 +179,10 @@ def forward(config, stream):
             try:
                 accepted=all(spool.append_batch(entries))
             except sqlite3.Error:
+                # The inbox filesystem may be too full even to record the loss.
+                # Keep a separate runtime marker and retry durably when space returns.
+                mark_io_loss(spool.loss_marker)
                 spool.db.rollback();accepted=False
-                try:
-                    with spool.db:spool.db.execute("INSERT OR REPLACE INTO meta VALUES ('io_error_at',?)",(time.time(),))
-                except sqlite3.Error:spool.db.rollback()
             if not accepted and time.monotonic()-last_alert>5:
                 print('AEGIS AUDIT LOSS: inbox full or unavailable; check disk and auditd health',flush=True)
                 last_alert=time.monotonic()

@@ -35,6 +35,13 @@ class Correlation(unittest.TestCase):
     def apply(self,row,proposal):
         with patch.object(a.pwd,'getpwnam',return_value=Mock(pw_uid=1002)):self.e.apply_analysis(*row,proposal)
     def status(self,row):return self.store.db.execute('SELECT status FROM cases WHERE id=?',(row[0],)).fetchone()[0]
+    def test_tick_reads_model_health_with_a_fresh_clock(self):
+        import monitoring
+        with patch.object(monitoring,'model_health',return_value={'status':'IDLE'}) as health:
+            self.e.tick()
+            health.assert_called_with(self.tmp.name,None)
+            self.e.tick(123.0)
+            health.assert_called_with(self.tmp.name,123.0)
     def test_actual_numeric_account_commit_race_survives_restart(self):
         stamp=time.time()
         line=f'type=ADD_USER msg=audit({stamp}:21912): pid=20337 uid=0 auid=1000 ses=112 subj=unconfined msg=\'op=adding user id=1001 exe="/usr/sbin/useradd" hostname=? addr=? terminal=? res=success\'\x1dUID="root" AUID="labadmin" ID="unknown(1001)"'

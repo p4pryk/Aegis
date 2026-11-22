@@ -93,6 +93,9 @@ class Journal:
         self.root.mkdir(mode=0o700,exist_ok=True)
         s=self.root.lstat()
         if not stat.S_ISDIR(s.st_mode) or s.st_uid!=os.geteuid() or stat.S_IMODE(s.st_mode)!=0o700:raise ValueError('Unsafe rollback directory')
+        self.steps=self.root/'steps';self.steps.mkdir(mode=0o700,exist_ok=True)
+        s=self.steps.lstat()
+        if not stat.S_ISDIR(s.st_mode) or s.st_uid!=os.geteuid() or stat.S_IMODE(s.st_mode)!=0o700:raise ValueError('Unsafe response binding directory')
     @contextlib.contextmanager
     def lock(self):
         fd=os.open(self.root/'lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
@@ -121,22 +124,61 @@ class Journal:
         atomic(self.path(r['id']),encoded(r).encode())
         self.publish(r)
     def entries(self):return [self.read(p.stem) for p in sorted(self.root.glob('*.json'))]
-    def record(self,executor,request):
+    def binding(self,context,request):
+        if not isinstance(context,dict) or set(context)!={'case_id','version','position'} or not isinstance(context['case_id'],str) or not re.fullmatch('[a-f0-9]{24}',context['case_id']) or type(context['version']) is not int or context['version']<1 or type(context['position']) is not int or context['position']<0:raise ValueError('Invalid response binding')
+        return self.steps/(digest(encoded(context))+'.json'),digest(encoded(request))
+    def recover_locked(self,context,request):
+        path,request_hash=self.binding(context,request)
+        try:fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        except FileNotFoundError:return None
+        with os.fdopen(fd) as stream:
+            s=os.fstat(stream.fileno())
+            if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.geteuid() or s.st_mode&0o077 or s.st_size>4096:raise ValueError('Unsafe response binding')
+            binding=json.load(stream)
+        if binding.get('context')!=context or binding.get('request_hash')!=request_hash:raise ValueError('Response binding changed; manual review required')
+        r=self.read(binding.get('receipt_id',''))
+        if r.get('context')!=context or r.get('request_hash')!=request_hash or r.get('boot')!=boot():raise ValueError('Response receipt changed; manual review required')
+        if r.get('state')!='contained' or not isinstance(r.get('result'),dict) or r['result'].get('verified') is not True:
+            raise ValueError('Previous response outcome is uncertain; manual review required')
+        action=r['action']
+        if action in SUPPORTED:
+            self.check(r)
+            if action=='block_ip' and (time.time()>=r.get('expires_at',0) or ip_state(r['target'])!=r.get('after')):
+                raise ValueError('Prior IP block is absent or expired; manual review required')
+        elif action=='terminate_session':
+            from agent import audit_processes
+            if audit_processes(request['boot_id'],request['session'],request['auid']):raise ValueError('Prior session outcome changed; manual review required')
+        elif action=='revoke_app_session':
+            from vulnerable_app import rpc
+            status=rpc({'op':'session_status','session':request['session']})
+            if not isinstance(status,dict) or status.get('verified') is not True or status.get('revoked') is not True:
+                raise ValueError('Prior application session outcome cannot be verified; manual review required')
+        else:raise ValueError('Prior response cannot be verified independently; manual review required')
+        return dict(r['result'],undo_receipt=r['id'],undo_available=r['eligible'],reconciled=True)
+    def recover(self,context,request):
+        with self.lock():return self.recover_locked(context,request)
+    def record(self,executor,request,context=None):
         with self.lock():
+            if context is not None:
+                recovered=self.recover_locked(context,request)
+                if recovered is not None:return recovered
+                binding_path,request_hash=self.binding(context,request)
             action=request.get('action');target=request.get('ip') or request.get('user') or request.get('path')
             if action=='block_ip':
                 address=ipaddress.ip_address(target);target=str(getattr(address,'ipv4_mapped',None) or address)
             r={'id':uuid.uuid4().hex,'action':action,'target':target,'boot':boot(),'time':time.time(),'state':'prepared','eligible':False,'history':[]}
+            if context is not None:r.update(context=context,request_hash=request_hash)
             try:
                 if action=='quarantine_account':r['before']=account(target)
                 elif action=='quarantine_persistence':r['before']=file_state(target)
                 elif action=='block_ip':r['before']=ip_state(target);r['expires_at']=request.get('expires_at',time.time()+executor.c['block_seconds'])
             except (OSError,ValueError,RuntimeError):r['capture_unavailable']=True
             self.save(r)
+            if context is not None:atomic(binding_path,encoded({'context':context,'request_hash':request_hash,'receipt_id':r['id']}).encode())
             try:
                 out=executor.execute(request,undo_token=r['id'])
                 if out.get('verified') is not True:raise RuntimeError('Containment not verified')
-                r['state']='contained'
+                r['state']='contained';r['result']=out
                 if action=='quarantine_account' and 'before' in r:
                     r['after']=account(target);b,a=r['before'],r['after']
                     r['eligible']=b['passwd_hash']!=a['passwd_hash'] or b['shadow_hash']!=a['shadow_hash']

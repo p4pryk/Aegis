@@ -48,6 +48,12 @@ class Continuity(unittest.TestCase):
             current=dict(first);current[key]=value
             self.assertFalse(release_check.continuous(current,first))
 
+    def test_missing_samples_or_clock_regression_break_continuity(self):
+        first=release_check.sample(self.db,self.now)
+        for timestamp in (self.now+16,self.now-1):
+            current=dict(first,time=timestamp)
+            self.assertFalse(release_check.continuous(current,first))
+
     def test_counter_increase_or_reset_fails_even_below_initial_value(self):
         first=release_check.sample(self.db,self.now)
         for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'):
