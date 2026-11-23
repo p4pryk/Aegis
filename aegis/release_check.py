@@ -18,7 +18,8 @@ def sample(db, now=None):
         raw_lost=audit['lost']
         if not (type(raw_lost) is int or isinstance(raw_lost,str) and raw_lost.isdigit()):raise ValueError('Invalid kernel loss counter')
         dropped=spool['dropped'];lost=int(raw_lost);rejected=states.get('correlation_overload',{}).get('rejections',0)
-        if any(type(v) is not int or v<0 for v in (dropped,lost,rejected)):raise ValueError('Invalid loss counter')
+        stream_gaps=spool.get('stream_gaps',0)
+        if any(type(v) is not int or v<0 for v in (dropped,lost,rejected,stream_gaps)):raise ValueError('Invalid loss counter')
         health_time=health['time'];enabled=str(audit['enabled'])
         if type(health_time) not in (int,float) or enabled not in ('1','2'):raise ValueError('Audit health unavailable')
         sources=health['sources']
@@ -34,13 +35,13 @@ def sample(db, now=None):
         from monitoring import audit_parse_counts
         parse_errors,_,unresolved=audit_parse_counts(states.get('audit_parse_error'),states.get('audit_parse_ack'))
         if parse_errors is None:raise ValueError('Invalid audit parse history')
-        if unresolved and 'Kernel audit: GAP' not in unhealthy:unhealthy.append('Kernel audit: GAP')
+        if (unresolved or stream_gaps) and 'Kernel audit: GAP' not in unhealthy:unhealthy.append('Kernel audit: GAP')
     except (KeyError,TypeError,OverflowError) as exc:raise ValueError('Incomplete collector health') from exc
     return {'time':now,'core_alive':0<=now-heartbeat.get('time',0)<15,
             'sensor_alive':0<=now-health_time<15,'core_pid':pid,'boot_id':boot,'unhealthy_sources':unhealthy,
             'response_mode':heartbeat.get('response_mode','unknown'),
             'core_p95_ms':health.get('loop_p95_ms'), 'audit_pending':spool.get('rows'),
-            'spool_dropped':dropped,'kernel_lost':lost,'refused_cases':rejected,'audit_parse_errors':parse_errors,
+            'spool_dropped':dropped,'kernel_lost':lost,'refused_cases':rejected,'audit_parse_errors':parse_errors,'audit_stream_gaps':stream_gaps,
             'model_status':states.get('model_health',{}).get('status','UNKNOWN')}
 
 def continuous(item, previous):
@@ -50,7 +51,8 @@ def continuous(item, previous):
     # because the collector appears healthy when sampling resumes.
     if not 0 <= item['time']-previous['time'] <= 15:return False
     if (item['boot_id'],item['core_pid'])!=(previous['boot_id'],previous['core_pid']):return False
-    return all(item[key]==previous[key] for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'))
+    return (all(item[key]==previous[key] for key in ('spool_dropped','kernel_lost','refused_cases','audit_parse_errors'))
+            and item.get('audit_stream_gaps',0)==previous.get('audit_stream_gaps',0))
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--seconds',type=int,default=120);parser.add_argument('--output',required=True);parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db');args=parser.parse_args()

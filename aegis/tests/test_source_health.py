@@ -48,6 +48,14 @@ class SourceHealth(unittest.TestCase):
         self.e=agent.CorrelatedEngine(self.c,self.store,None)
         self.assertEqual(self.states()[0]['status'],'GAP')
 
+    def test_incomplete_audit_stream_is_visible_after_reopen(self):
+        self.spool.record_stream_gap()
+        row=self.states()[0]
+        self.assertEqual(row['status'],'GAP');self.assertIn('audit stream gaps: 1',row['reason'])
+        reopened=audit_spool.Spool(self.c)
+        try:self.assertEqual(reopened.health()['stream_gaps'],1)
+        finally:reopened.db.close()
+
     def test_disk_error_is_visible_until_and_after_durable_recovery(self):
         import sqlite3
         marker=self.spool.loss_marker

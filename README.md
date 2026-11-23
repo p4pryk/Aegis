@@ -496,6 +496,12 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-23 — Report interrupted audit streams
+
+- Record a possible audit gap when the producer receives an incomplete final record or its stream read/poll fails. Preserve the counter across restarts, show `GAP` in Source Health and fail continuity checks; do not store or process incomplete data as a full event. If the inbox cannot record the gap, reuse the pending I/O-loss marker.
+- A clean EOF with no partial record does not create a gap. The counter has no acknowledgement workflow yet, and a forced termination or power loss before a gap is recorded can still hide missing data; lost records are not recovered.
+- Validation: reproduced the previously unreported incomplete record on the Azure Linux VM. After the fix, 65 focused and regression tests passed on that VM, including real pipe EOF, read/poll failures, persistence across reopening and a simulated full inbox. Locally, 405 tests completed with 9 Linux/root-only skips. No model call or defensive action was made.
+
 ### 2026-11-22 — Collection, model transport and response recovery
 
 - Require HTTPS model endpoints, reject redirects and implicit environment proxies, and optionally restrict endpoints to exact configured hostnames. Validate the endpoint before obtaining a managed-identity token.

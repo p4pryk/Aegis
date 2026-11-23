@@ -31,7 +31,7 @@ class Spool:
         self.db.executescript('''CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT, received REAL, boot TEXT, line TEXT, snapshots TEXT, bytes INTEGER);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value);
-            INSERT OR IGNORE INTO meta VALUES ('bytes',0),('rows',0),('accepted',0),('dropped',0);''')
+            INSERT OR IGNORE INTO meta VALUES ('bytes',0),('rows',0),('accepted',0),('dropped',0),('stream_gaps',0);''')
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('identity',?)", (uuid.uuid4().hex,))
         self.db.commit()
         os.chmod(self.path, 0o600)
@@ -57,6 +57,11 @@ class Spool:
             for key in ('bytes','rows','accepted','dropped'):
                 self.db.execute('UPDATE meta SET value=? WHERE key=?',(meta[key],key))
         return accepted
+
+    def record_stream_gap(self):
+        # Record a possible gap without storing or interpreting partial data.
+        with self.db:
+            self.db.execute("UPDATE meta SET value=value+1 WHERE key='stream_gaps'")
 
     def batch(self, cursor, limit=100):
         return self.db.execute('SELECT id,received,boot,line,snapshots FROM inbox WHERE id>? ORDER BY id LIMIT ?',
@@ -101,6 +106,15 @@ def persist_io_loss(spool):
         spool.db.rollback();return False
     spool.loss_marker.unlink()
     return True
+
+
+def mark_stream_gap(spool):
+    try:spool.record_stream_gap()
+    except sqlite3.Error:
+        # Preserve a possible gap even if the inbox cannot write.
+        mark_io_loss(spool.loss_marker)
+        spool.db.rollback()
+        persist_io_loss(spool)
 
 
 def consume(engine, spool):
@@ -160,10 +174,19 @@ def forward(config, stream):
     try:
         while True:
             waiting_for_space=not persist_io_loss(spool)
-            ready,_,_=select.select([stream.fileno()],[],[],1 if waiting_for_space else None)
-            if not ready:continue
-            chunk=os.read(stream.fileno(),65536)
-            if not chunk:break
+            try:
+                ready,_,_=select.select([stream.fileno()],[],[],1 if waiting_for_space else None)
+                if not ready:continue
+                chunk=os.read(stream.fileno(),65536)
+            except OSError:
+                mark_stream_gap(spool)
+                print('AEGIS AUDIT GAP: stream read failed',flush=True)
+                raise
+            if not chunk:
+                if pending:
+                    mark_stream_gap(spool)
+                    print('AEGIS AUDIT GAP: stream ended with an incomplete record',flush=True)
+                break
             lines=(pending+chunk).split(b'\n');pending=lines.pop()
             if len(pending)>65536:
                 lines.append(pending);pending=b''
