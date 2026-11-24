@@ -68,6 +68,14 @@ class Deferred(unittest.TestCase):
     def age(self,row,seconds):
         self.store.db.execute('UPDATE analysis_queue SET queued_at=? WHERE case_id=?',(time.time()-seconds,row[0]));self.store.db.commit()
 
+    def test_clock_skew_reason_is_not_masked_by_budget_status(self):
+        self.chain();row=self.awaiting();root=pathlib.Path(self.c['ai_results_dir']);root.mkdir(exist_ok=True)
+        now=time.time();ai_worker.write(root/'correlation-worker-state.json',dict(hour=int(now//3600)+1,calls=40,attempts={}))
+        cfg=dict(max_calls_per_hour=40,response_reserve_calls=10,min_call_interval_seconds=8)
+        with patch.object(ai_worker,'DB',str(self.store.path)),patch.object(ai_worker,'OUT',root),patch.object(ai_worker,'analyze') as model:
+            ai_worker.cycle(cfg);model.assert_not_called();self.e.tick()
+        self.assertEqual(self.store.db.execute('SELECT reason FROM analysis_queue WHERE case_id=?',(row[0],)).fetchone()[0],'CLOCK SKEW')
+
     def test_late_positive_verdict_is_recorded_but_cannot_execute(self):
         self.chain();row=self.awaiting();self.age(row,100)
         self.apply(row,self.proposal(row))

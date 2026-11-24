@@ -26,7 +26,7 @@ def reserve_call(config):
     while True:
         now=time.time()
         state=json.loads(path.read_text()) if path.exists() else {'hour':int(now//3600),'calls':0,'attempts':{}}
-        if state['hour']!=int(now//3600):state.update(hour=int(now//3600),calls=0)
+        if not ai_worker.advance_budget_hour(state,now):raise RuntimeError('Clock moved backwards; model budget remains protected')
         if state['calls']>=config.get('max_calls_per_hour',40):raise RuntimeError('Existing hourly model budget exhausted; do not reset its counter')
         delay=state.get('last_call_at',0)+config.get('min_call_interval_seconds',8)-now
         if delay>0:

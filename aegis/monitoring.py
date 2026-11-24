@@ -135,7 +135,7 @@ def model_health(directory,now=None):
         now=time.time() if now is None else now
         stamp=data['time']
         if type(stamp) not in (int,float) or not 0<=now-stamp<45:raise ValueError('stale')
-        statuses=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE')
+        statuses=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE','CLOCK SKEW')
         if data['status'] not in statuses:raise ValueError('unknown state')
         result={'time':stamp,'status':data['status']}
         for key in ('pending','oldest_seconds','hourly_calls','cap','reserve','budget_resets_at','unavailable_until'):

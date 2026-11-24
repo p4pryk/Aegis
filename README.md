@@ -448,6 +448,8 @@ The console polls its read-only database every second. Case assessment waits for
 
 The terminal displays model availability, queued cases, oldest wait and used/reserved budget. Stale or missing worker health becomes `MODEL UNAVAILABLE`. The core persists each snapshot version’s queue entry, original enqueue time and boot ID. Waiting for budget or provider recovery survives restarts and resumes automatically, within `analysis_queue_max_age_seconds` (default two hours, clamped to 90 seconds–24 hours). The worker still allows at most three failed model attempts. `analysis_timeout_seconds` (default 90 seconds) now limits automatic response eligibility, not historical description: a later positive verdict is recorded but its actions are cleared and sent to manual review. A changed host boot also prohibits automatic response from queued evidence. Expired queue entries and invalid/failed model results require manual review; they do not retry indefinitely. No model error or missing assessment authorizes a response.
 
+If the system clock moves to an earlier hour than the saved model budget, the worker reports `CLOCK SKEW` and pauses model calls without resetting the count; local collection continues. Calls resume when trusted time reaches the saved budget hour, still subject to that hour’s remaining allowance. If an incorrect future clock was previously saved, investigate the system clock and model usage before any manual budget-state recovery; do not blindly reset the counter. Queued assessments can expire while the worker is paused.
+
 A budget setting is a cost ceiling, not a latency guarantee. The worker makes model requests serially and spaces their starts by at least eight seconds by default. Even if requests returned instantly and budget were unlimited, at most 12 requests could start during a 90-second interval; responses must also finish before the response-eligibility deadline. An exhausted budget can postpone even response-eligible cases past that deadline. Increasing the hourly cap alone cannot remove the serial-spacing limit, and lowering the interval can raise cost and provider pressure. Choose settings only after measuring representative bursts, failed attempts, queue age, response eligibility and spend for the actual deployment.
 
 The 40-call cap is a cost guardrail for this prototype, not a monetary budget or a capacity guarantee. It averages one call per 90 seconds over a full hour, although short bursts can be processed faster; the reservation protects some response capacity but cannot guarantee a response during sustained attacks. Evidence correlation is bounded to ten minutes. Collection runs continuously, but model-backed assessment and response have **no near-real-time guarantee**, especially under load or model throttling. Production rollout still requires configuring and verifying the required local evidence-retention policy, sustained load testing beyond bounded lab bursts, and exclusion of the privileged training broker.
@@ -504,6 +506,12 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 `aegis/live-source-health-tests.py` briefly suspends/resumes collectors and core and stops/restarts the training broker on the isolated VM, preserving evidence. It saves source-only snapshots for visual checks and restores running components in cleanup.
 
 ## Change log
+
+### 2026-11-24 — Protect model budget against clock rollback
+
+- Preserve the recorded hourly call count if the system clock moves backwards across an hour boundary. Pause model requests with a visible `CLOCK SKEW` state, keep the original budget reset time, and resume under the same count once the saved hour is reached. The evaluator and prompt-test fixture use the same protection.
+- Keep the warning visible in the analysis queue and diagnostics; collection remains independent. A previously saved incorrect future hour can require operator investigation, and waiting cases can expire.
+- Validation: reproduced the earlier duplicate budget reset locally without a model call. After the fix, 49 focused and regression tests passed on the Azure Linux VM, including clock rollback, restoration, the next hour, evaluator budget and queue visibility. The full local suite completed 415 tests with nine Linux/root-only skips.
 
 ### 2026-11-24 — Update CI action runtimes
 

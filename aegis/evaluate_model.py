@@ -45,7 +45,7 @@ def reserve_and_analyze(row,config,deadline,counter=None):
             if not isinstance(state,dict) or type(state.get('hour')) is not int or type(state.get('calls')) is not int or state['calls']<0 or not isinstance(state.get('attempts'),dict):raise ValueError('Invalid shared budget state')
             for field in ('last_call_at','unavailable_until'):
                 if type(state.get(field,0)) not in (int,float) or not math.isfinite(state.get(field,0)) or state.get(field,0)<0:raise ValueError('Invalid shared budget state')
-            if state['hour']!=int(now//3600):state.update(hour=int(now//3600),calls=0)
+            if not ai_worker.advance_budget_hour(state,now):raise RuntimeError('Clock moved backwards; model budget remains protected')
             if now<state.get('unavailable_until',0):raise RuntimeError('Model provider is in cooldown')
             if state['calls']>=cap-reserve:raise RuntimeError('Ordinary model budget exhausted; response reserve protected')
             wait=max(0,state.get('last_call_at',0)+spacing-now)

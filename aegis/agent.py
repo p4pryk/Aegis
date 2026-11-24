@@ -826,7 +826,7 @@ class CorrelatedEngine:
         health=model_health(self.c.get('ai_results_dir','/var/lib/defense-agent-ai'),health_now)
         for identifier,version,evidence,updated in self.db.execute("SELECT id,version,evidence_json,updated_at FROM cases WHERE status='awaiting_analysis'").fetchall():
             reason=health['status']
-            if health.get('cap',0)>0:
+            if health.get('cap',0)>0 and health['status']!='CLOCK SKEW':
                 if health['hourly_calls']>=health['cap']:reason='BUDGET EXHAUSTED'
                 elif not json.loads(evidence).get('allowed_actions') and health['hourly_calls']>=health['cap']-health.get('reserve',0):reason='RESPONSE BUDGET RESERVED'
             self.db.execute('INSERT INTO analysis_queue VALUES (?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET version=excluded.version,queued_at=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.queued_at ELSE excluded.queued_at END,boot_id=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.boot_id ELSE excluded.boot_id END,reason=excluded.reason WHERE analysis_queue.version!=excluded.version OR analysis_queue.reason!=excluded.reason',(identifier,version,updated,self.boot_id,reason))

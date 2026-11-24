@@ -42,6 +42,23 @@ class Evaluation(unittest.TestCase):
         self.assertEqual(counter,[1]);self.assertEqual(call.call_count,1)
         self.assertIn('existing-v1',self.saved()['attempts'])
 
+    def test_clock_rollback_refuses_evaluation_without_resetting_budget(self):
+        self.state(3,hour=2,last_call_at=7200);counter=[0]
+        with patch.object(ai_worker.time,'time',return_value=3601),patch.object(ai_worker,'analyze') as call:
+            with self.assertRaisesRegex(RuntimeError,'Clock moved backwards'):
+                evaluate_model.reserve_and_analyze({},self.config,time.monotonic()+5,counter)
+        call.assert_not_called();self.assertEqual(counter,[0])
+        self.assertEqual((self.saved()['hour'],self.saved()['calls']),(2,3))
+
+    def test_live_prompt_fixture_cannot_reset_budget_on_clock_rollback(self):
+        import importlib.util
+        path=pathlib.Path(__file__).resolve().parents[1]/'live-prompt-tests.py'
+        spec=importlib.util.spec_from_file_location('prompt_fixture',path);fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        self.state(4,hour=2,last_call_at=7200)
+        with patch.object(ai_worker.time,'time',return_value=3601):
+            with self.assertRaisesRegex(RuntimeError,'Clock moved backwards'):fixture.reserve_call(self.config)
+        self.assertEqual((self.saved()['hour'],self.saved()['calls']),(2,4))
+
     def test_provider_throttle_is_shared_and_prevents_more_calls(self):
         self.state();counter=[0]
         error=urllib.error.HTTPError('https://example.invalid',429,'throttled',{'Retry-After':'120'},None)

@@ -64,7 +64,7 @@ def diagnose(config_path,model_path,database_path,now=None):
                 if unhealthy:add('Collector','WARN','Review source health: '+', '.join(unhealthy)+'.')
                 else:add('Collector','OK','Enabled collectors report LIVE or QUIET. QUIET does not prove logs are emitted.')
         model=states.get('model_health',{});model_stamp=model.get('time',0);status=model.get('status')
-        allowed=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE')
+        allowed=('ANALYZING','IDLE','WAITING FOR MODEL','BUDGET EXHAUSTED','RESPONSE BUDGET RESERVED','MODEL UNAVAILABLE','CLOCK SKEW')
         if type(model_stamp) in (int,float) and 0<=now-model_stamp<45 and status in allowed:add('Model worker','OK' if status in ('ANALYZING','IDLE') else 'WARN',status+'.')
         else:add('Model worker','UNKNOWN','Current worker state unavailable.')
     except (OSError,ValueError,TypeError,KeyError,AttributeError,sqlite3.Error):

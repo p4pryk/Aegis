@@ -68,6 +68,21 @@ class Queue(unittest.TestCase):
         self.assertEqual(self.health()['status'],'WAITING FOR MODEL')
         self.now=7208;w.cycle(self.cfg);self.model.assert_called_once()
 
+    def test_clock_rollback_does_not_reset_or_spend_budget(self):
+        self.row();self.state(40,last_call_at=7200);self.now=3601
+        w.cycle(self.cfg);self.model.assert_not_called()
+        self.assertEqual((self.saved()['hour'],self.saved()['calls']),(2,40))
+        self.assertEqual(self.health()['status'],'CLOCK SKEW');self.assertEqual(self.health()['budget_resets_at'],10800)
+        self.now=7209;w.cycle(self.cfg);self.model.assert_not_called()
+        self.assertEqual((self.saved()['hour'],self.saved()['calls']),(2,40))
+        self.assertEqual(self.health()['status'],'BUDGET EXHAUSTED')
+        self.now=10801;w.cycle(self.cfg);self.model.assert_called_once()
+        self.assertEqual((self.saved()['hour'],self.saved()['calls']),(3,1))
+
+    def test_clock_rollback_is_visible_even_when_queue_is_empty(self):
+        self.state(1,last_call_at=7200);self.now=3601;w.cycle(self.cfg)
+        self.assertEqual(self.health()['status'],'CLOCK SKEW');self.model.assert_not_called()
+
     def test_provider_throttle_blocks_all_cases_and_survives_restart(self):
         self.row();self.model.side_effect=urllib.error.HTTPError('https://example.invalid',429,'throttle',{'Retry-After':'120'},None)
         w.cycle(self.cfg);self.assertEqual(self.saved()['calls'],1)

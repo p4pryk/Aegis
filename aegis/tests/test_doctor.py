@@ -47,6 +47,10 @@ class Doctor(unittest.TestCase):
             result=self.run_doctor()
         self.assertFalse(result['healthy']);self.assertIn('RESPONSE BUDGET RESERVED',json.dumps(result))
 
+    def test_clock_skew_is_a_visible_warning(self):
+        self.put('model_health',{'time':self.now,'status':'CLOCK SKEW'})
+        result=self.run_doctor();self.assertFalse(result['healthy']);self.assertIn('CLOCK SKEW',json.dumps(result))
+
     def test_untrusted_source_name_cannot_inject_terminal_output(self):
         self.put('sensor_health',{'time':self.now,'sources':[{'name':'Kernel audit','status':'LIVE'},{'name':'bad\u001b[31m','status':'DOWN'}]})
         result=self.run_doctor();self.assertFalse(result['healthy'])

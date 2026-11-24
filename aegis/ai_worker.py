@@ -148,9 +148,18 @@ def limits(cfg):
         raise ValueError('Invalid model budget configuration')
     return cap,reserve,spacing
 
+def advance_budget_hour(state,now):
+    """Never reset a durable budget when the wall clock moves backwards."""
+    hour=int(now//3600)
+    if hour<state['hour']:return False
+    if hour>state['hour']:state.update(hour=hour,calls=0)
+    return True
+
+
 def wait_reason(row,state,cfg,now):
     cap,reserve,spacing=limits(cfg)
     urgent=bool(json.loads(row['evidence_json']).get('allowed_actions'))
+    if int(now//3600)<state['hour']:return 'CLOCK SKEW'
     if state['calls']>=cap:return 'BUDGET EXHAUSTED'
     if not urgent and state['calls']>=cap-reserve:return 'RESPONSE BUDGET RESERVED'
     if now<state.get('unavailable_until',0):return 'MODEL UNAVAILABLE'
@@ -176,7 +185,7 @@ def cycle_locked(cfg):
     cap,reserve,_=limits(cfg);now=time.time();statepath=OUT/'correlation-worker-state.json'
     state=json.loads(statepath.read_text()) if statepath.exists() else {'hour':int(now//3600),'calls':0,'attempts':{}}
     saved=json.dumps(state,sort_keys=True) if statepath.exists() else None
-    if state['hour']!=int(now//3600):state.update(hour=int(now//3600),calls=0)
+    clock_ok=advance_budget_hour(state,now)
     conn=sqlite3.connect(pathlib.Path(DB).as_uri()+'?mode=ro',uri=True,timeout=2);conn.row_factory=sqlite3.Row
     try:rows=conn.execute("SELECT * FROM cases WHERE status='awaiting_analysis' ORDER BY CASE WHEN json_array_length(evidence_json,'$.allowed_actions')>0 THEN 0 ELSE 1 END, updated_at LIMIT 256").fetchall()
     finally:conn.close()
@@ -191,9 +200,9 @@ def cycle_locked(cfg):
         pending.append(row)
     reasons=[wait_reason(row,state,cfg,now) for row in pending]
     selected=next((row for row,reason in zip(pending,reasons) if reason=='READY'),None)
-    health={'time':now,'status':'ANALYZING' if selected else reasons[0] if reasons else 'IDLE',
-            'pending':len(pending),'oldest_seconds':round(max((now-r['updated_at'] for r in pending),default=0),1),
-            'hourly_calls':state['calls'],'cap':cap,'reserve':reserve,'budget_resets_at':(int(now//3600)+1)*3600,
+    health={'time':now,'status':'CLOCK SKEW' if not clock_ok else 'ANALYZING' if selected else reasons[0] if reasons else 'IDLE',
+            'pending':len(pending),'oldest_seconds':round(max(0,max((now-r['updated_at'] for r in pending),default=0)),1),
+            'hourly_calls':state['calls'],'cap':cap,'reserve':reserve,'budget_resets_at':(state['hour']+1)*3600,
             'unavailable_until':state.get('unavailable_until',0)}
     write(OUT/'heartbeat.json',health)
     if selected:
