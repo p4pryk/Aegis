@@ -31,7 +31,7 @@ class Spool:
         self.db.executescript('''CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT, received REAL, boot TEXT, line TEXT, snapshots TEXT, bytes INTEGER);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value);
-            INSERT OR IGNORE INTO meta VALUES ('bytes',0),('rows',0),('accepted',0),('dropped',0),('stream_gaps',0);''')
+            INSERT OR IGNORE INTO meta VALUES ('bytes',0),('rows',0),('accepted',0),('dropped',0),('stream_gaps',0),('stream_reviewed',0);''')
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('identity',?)", (uuid.uuid4().hex,))
         self.db.commit()
         os.chmod(self.path, 0o600)

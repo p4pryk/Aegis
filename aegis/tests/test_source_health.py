@@ -56,6 +56,53 @@ class SourceHealth(unittest.TestCase):
         try:self.assertEqual(reopened.health()['stream_gaps'],1)
         finally:reopened.db.close()
 
+    def test_stream_review_is_generation_and_count_checked_and_reopens(self):
+        self.spool.record_stream_gap();identity=self.spool.identity
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        with patch.object(maintenance.os,'geteuid',return_value=1):
+            with self.assertRaises(PermissionError):maintenance.acknowledge_audit_stream(self.spool.path,identity,1,'Reviewed')
+        with patch.object(maintenance.os,'geteuid',return_value=0):
+            for expected_id,expected_count,reason in (('f'*32,1,'Reviewed'),(identity,2,'Reviewed'),(identity,1,'')):
+                with self.assertRaises(ValueError):maintenance.acknowledge_audit_stream(self.spool.path,expected_id,expected_count,reason)
+            maintenance.acknowledge_audit_stream(self.spool.path,identity,1,'Reviewed stream interruption')
+            with self.assertRaises(ValueError):maintenance.acknowledge_audit_stream(self.spool.path,identity,1,'Duplicate')
+        row=self.states()[0]
+        self.assertEqual(row['status'],'QUIET');self.assertEqual((row['audit_stream_gaps'],row['audit_stream_reviewed']),(1,1))
+        text='\n'.join(console.source_lines({'sensor_health':{'time':self.now,'sources':self.states()}},120,self.now))
+        self.assertIn('Historical stream gaps: 1',text);self.assertIn(identity,text);self.assertIn('Lost records are not recovered',text)
+        history=maintenance.audit_stream_history(self.spool.path)
+        self.assertEqual(len(history),1);self.assertEqual(history[0]['inbox_identity'],identity)
+        self.spool.record_stream_gap();self.assertEqual(self.states()[0]['status'],'GAP')
+        with patch.object(maintenance.os,'geteuid',return_value=0):
+            with self.assertRaises(ValueError):maintenance.acknowledge_audit_stream(self.spool.path,identity,1,'Stale')
+            maintenance.acknowledge_audit_stream(self.spool.path,identity,2,'Reviewed new gap')
+        self.assertEqual(self.states()[0]['status'],'QUIET');self.assertEqual(len(maintenance.audit_stream_history(self.spool.path)),2)
+
+    def test_stream_review_rechecks_count_under_the_inbox_write_lock(self):
+        import sqlite3,threading
+        self.spool.record_stream_gap();identity=self.spool.identity
+        writer=sqlite3.connect(self.spool.path,timeout=2);self.addCleanup(writer.close)
+        writer.execute('BEGIN IMMEDIATE');writer.execute("UPDATE meta SET value=value+1 WHERE key='stream_gaps'")
+        entered=threading.Event();errors=[]
+        def review():
+            entered.set()
+            try:maintenance.acknowledge_audit_stream(self.spool.path,identity,1,'Stale review')
+            except Exception as exc:errors.append(exc)
+        with patch.object(maintenance.os,'geteuid',return_value=0):
+            thread=threading.Thread(target=review);thread.start();self.assertTrue(entered.wait(2));writer.commit();thread.join(5)
+        self.assertFalse(thread.is_alive());self.assertEqual(len(errors),1);self.assertIsInstance(errors[0],ValueError)
+        self.assertEqual(self.spool.health()['stream_reviewed'],0);self.assertEqual(self.spool.health()['stream_gaps'],2)
+        self.assertEqual(maintenance.audit_stream_history(self.spool.path),[])
+
+    def test_stream_review_cannot_clear_other_loss_or_malformed_counter(self):
+        self.spool.record_stream_gap();audit_spool.mark_io_loss(self.spool.loss_marker)
+        with patch.object(maintenance.os,'geteuid',return_value=0):maintenance.acknowledge_audit_stream(self.spool.path,self.spool.identity,1,'Reviewed stream')
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        self.spool.loss_marker.unlink();self.spool.db.execute("UPDATE meta SET value='bad' WHERE key='stream_reviewed'");self.spool.db.commit()
+        self.assertEqual(self.states()[0]['status'],'GAP')
+        with patch.object(maintenance.os,'geteuid',return_value=0):
+            with self.assertRaises(ValueError):maintenance.acknowledge_audit_stream(self.spool.path,self.spool.identity,1,'Invalid state')
+
     def test_disk_error_is_visible_until_and_after_durable_recovery(self):
         import sqlite3
         marker=self.spool.loss_marker

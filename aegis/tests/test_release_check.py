@@ -84,6 +84,15 @@ class Continuity(unittest.TestCase):
         health['audit_spool']['stream_gaps']='invalid';self.put('sensor_health',health)
         with self.assertRaises(ValueError):release_check.sample(self.db,self.now)
 
+    def test_stream_gap_review_does_not_erase_a_gap_between_samples(self):
+        first=release_check.sample(self.db,self.now)
+        health={'time':self.now,'audit':{'enabled':'1','lost':'3'},'audit_spool':{'dropped':2,'rows':0,'stream_gaps':1,'stream_reviewed':1},
+                'sources':[{'name':'Kernel audit','status':'LIVE'}]}
+        self.put('sensor_health',health);reviewed=release_check.sample(self.db,self.now+5)
+        self.assertTrue(release_check.continuous(reviewed,None));self.assertFalse(release_check.continuous(reviewed,first))
+        health['audit_spool']['stream_reviewed']=2;self.put('sensor_health',health)
+        with self.assertRaises(ValueError):release_check.sample(self.db,self.now)
+
     def test_invalid_or_regressed_parse_history_fails_closed(self):
         self.put('audit_parse_error',{'count':'invalid'})
         with self.assertRaises(ValueError):release_check.sample(self.db,self.now)

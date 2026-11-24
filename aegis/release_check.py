@@ -18,8 +18,9 @@ def sample(db, now=None):
         raw_lost=audit['lost']
         if not (type(raw_lost) is int or isinstance(raw_lost,str) and raw_lost.isdigit()):raise ValueError('Invalid kernel loss counter')
         dropped=spool['dropped'];lost=int(raw_lost);rejected=states.get('correlation_overload',{}).get('rejections',0)
-        stream_gaps=spool.get('stream_gaps',0)
-        if any(type(v) is not int or v<0 for v in (dropped,lost,rejected,stream_gaps)):raise ValueError('Invalid loss counter')
+        from monitoring import audit_stream_counts
+        stream_gaps,_,stream_unresolved=audit_stream_counts(spool)
+        if stream_gaps is None or any(type(v) is not int or v<0 for v in (dropped,lost,rejected)):raise ValueError('Invalid loss counter')
         health_time=health['time'];enabled=str(audit['enabled'])
         if type(health_time) not in (int,float) or enabled not in ('1','2'):raise ValueError('Audit health unavailable')
         sources=health['sources']
@@ -35,7 +36,7 @@ def sample(db, now=None):
         from monitoring import audit_parse_counts
         parse_errors,_,unresolved=audit_parse_counts(states.get('audit_parse_error'),states.get('audit_parse_ack'))
         if parse_errors is None:raise ValueError('Invalid audit parse history')
-        if (unresolved or stream_gaps) and 'Kernel audit: GAP' not in unhealthy:unhealthy.append('Kernel audit: GAP')
+        if (unresolved or stream_unresolved) and 'Kernel audit: GAP' not in unhealthy:unhealthy.append('Kernel audit: GAP')
     except (KeyError,TypeError,OverflowError) as exc:raise ValueError('Incomplete collector health') from exc
     return {'time':now,'core_alive':0<=now-heartbeat.get('time',0)<15,
             'sensor_alive':0<=now-health_time<15,'core_pid':pid,'boot_id':boot,'unhealthy_sources':unhealthy,

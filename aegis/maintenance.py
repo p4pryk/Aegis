@@ -173,19 +173,56 @@ def audit_gap_history(database):
     finally:db.close()
 
 
+def acknowledge_audit_stream(database, expected_identity, expected_count, reason):
+    """Acknowledge one exact inbox generation and count under its write lock."""
+    from monitoring import audit_stream_counts
+    if os.geteuid()!=0:raise PermissionError('Run as root')
+    if not isinstance(expected_identity,str) or not re.fullmatch('[a-f0-9]{32}',expected_identity):raise ValueError('Invalid inbox identity')
+    if type(expected_count) is not int or expected_count<1:raise ValueError('Invalid expected count')
+    if not isinstance(reason,str) or not 1<=len(reason.strip())<=500:raise ValueError('A reason of 1–500 characters is required')
+    db=sqlite3.connect(pathlib.Path(database).resolve().as_uri()+'?mode=rw',uri=True,timeout=10)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        values=dict(db.execute("SELECT key,value FROM meta WHERE key IN ('identity','stream_gaps','stream_reviewed')"))
+        total,_,unresolved=audit_stream_counts(values)
+        if values.get('identity')!=expected_identity or total!=expected_count or not unresolved:
+            raise ValueError('Inbox or stream gap changed or is already reviewed; inspect current source health')
+        entry={'time':time.time(),'inbox_identity':expected_identity,'count':total,'reason':reason.strip(),**operator_identity()}
+        db.execute('CREATE TABLE IF NOT EXISTS stream_gap_reviews(time REAL,count INTEGER,details_json TEXT)')
+        db.execute('INSERT INTO stream_gap_reviews VALUES (?,?,?)',(entry['time'],total,json.dumps(entry)))
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('stream_reviewed',?)",(total,))
+        db.commit()
+    finally:db.close()
+
+
+def audit_stream_history(database):
+    db=sqlite3.connect(pathlib.Path(database).resolve().as_uri()+'?mode=ro',uri=True,timeout=10)
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='stream_gap_reviews'").fetchone():return []
+        return [json.loads(row[0]) for row in db.execute('SELECT details_json FROM stream_gap_reviews ORDER BY rowid DESC LIMIT 100')]
+    finally:db.close()
+
+
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description='Export a case, record a review, or inspect audit gap history')
     parser.add_argument('case_id',nargs='?');parser.add_argument('--output')
     parser.add_argument('--resolve-review',action='store_true');parser.add_argument('--version',type=int);parser.add_argument('--reason')
     parser.add_argument('--ack-audit-parse',type=int,metavar='COUNT');parser.add_argument('--audit-gap-history',action='store_true')
     parser.add_argument('--database',default='/var/lib/defense-agent/incidents.db')
+    parser.add_argument('--ack-audit-stream',type=int,metavar='COUNT');parser.add_argument('--spool-identity');parser.add_argument('--audit-stream-history',action='store_true')
+    parser.add_argument('--spool-database',default='/var/lib/defense-agent-audit/inbox.db')
     args=parser.parse_args()
-    if args.resolve_review and args.case_id and not args.output and args.version is not None and args.reason and args.ack_audit_parse is None and not args.audit_gap_history:
+    stream_requested=args.ack_audit_stream is not None or args.spool_identity is not None or args.audit_stream_history
+    if not stream_requested and args.resolve_review and args.case_id and not args.output and args.version is not None and args.reason and args.ack_audit_parse is None and not args.audit_gap_history:
         resolve_review(args.database,args.case_id,args.version,args.reason);print('Review recorded; no response or rollback was performed.')
-    elif args.output and args.case_id and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None and not args.audit_gap_history:
+    elif not stream_requested and args.output and args.case_id and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None and not args.audit_gap_history:
         export_case(args.database,args.case_id,args.output)
-    elif args.ack_audit_parse is not None and args.reason and not args.case_id and not args.output and not args.resolve_review and args.version is None and not args.audit_gap_history:
+    elif not stream_requested and args.ack_audit_parse is not None and args.reason and not args.case_id and not args.output and not args.resolve_review and args.version is None and not args.audit_gap_history:
         acknowledge_audit_parse(args.database,args.ack_audit_parse,args.reason);print('Audit gap review recorded; lost records were not recovered.')
-    elif args.audit_gap_history and not args.case_id and not args.output and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None:
+    elif not stream_requested and args.audit_gap_history and not args.case_id and not args.output and not args.resolve_review and args.version is None and args.reason is None and args.ack_audit_parse is None:
         print(json.dumps(audit_gap_history(args.database),indent=2))
-    else:parser.error('Use CASE_ID --output PATH; CASE_ID --resolve-review --version N --reason TEXT; --ack-audit-parse COUNT --reason TEXT; or --audit-gap-history')
+    elif args.ack_audit_stream is not None and args.spool_identity and args.reason and not args.audit_stream_history and not args.case_id and not args.output and not args.resolve_review and args.version is None and args.ack_audit_parse is None and not args.audit_gap_history:
+        acknowledge_audit_stream(args.spool_database,args.spool_identity,args.ack_audit_stream,args.reason);print('Audit stream gap review recorded; lost records were not recovered.')
+    elif args.audit_stream_history and args.ack_audit_stream is None and args.spool_identity is None and args.reason is None and not args.case_id and not args.output and not args.resolve_review and args.version is None and args.ack_audit_parse is None and not args.audit_gap_history:
+        print(json.dumps(audit_stream_history(args.spool_database),indent=2))
+    else:parser.error('Choose one export, review or audit-gap operation; run --help for options')

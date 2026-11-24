@@ -191,6 +191,15 @@ sudo python3 /opt/defense-agent/maintenance.py --audit-gap-history
 
 Acknowledgement records the reason, count, process UID and optional unverified `SUDO_UID` hint locally. It does not recover records or clear other loss indicators. The source view retains the historical count; a new parsing error returns the source to `GAP`. If the count changes while the operator is reviewing it, the command refuses the stale acknowledgement. The continuity report also compares the counter across samples so an error acknowledged between samples still fails that run. Use ordinary operational notes in the reason; the history is stored in the local incident database and the history command shows its latest 100 entries.
 
+Interrupted audit-stream gaps have a separate review stored in the audit inbox, not the incident database. After investigating, use the **current count and inbox ID** shown in Source Health:
+
+```bash
+sudo python3 /opt/defense-agent/maintenance.py --ack-audit-stream COUNT --spool-identity INBOX_ID --reason "Investigated stream interruption"
+sudo python3 /opt/defense-agent/maintenance.py --audit-stream-history
+```
+
+For a custom inbox, add `--spool-database /path/to/inbox.db` to either command. The review is committed under the inbox write lock, includes the reason and operator identity, and is refused if the inbox or count changed. It does not recover records or clear other loss indicators; a later interruption reopens `GAP`. History is local to the inbox and the command returns its latest 100 entries. The continuity report compares the total across samples even after a review.
+
 Export a retained incident **before** its retention period expires:
 
 ```bash
@@ -496,10 +505,16 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-24 — Review audit stream gaps
+
+- Add a root-only review for an exact audit inbox identity and stream-gap count. Store the review history in the inbox under the same write lock as new gaps; reject stale, duplicated or malformed reviews. A new interruption reopens the warning, and other loss indicators remain unchanged.
+- Show historical and reviewed stream gaps and the inbox identity in Source Health. Continuity checks still detect a counter change even if the new gap is reviewed between samples; acknowledging it does not restore lost records.
+- Validation: 69 focused and regression tests and seven isolated producer/CLI checks passed on the Azure Linux VM. They covered an incomplete real pipe record, stale and wrong-identity requests, review history, a new gap, a concurrent write and independent I/O loss. The full local suite completed 409 tests with nine Linux/root-only skips; no model calls or response actions were made.
+
 ### 2026-11-23 — Report interrupted audit streams
 
 - Record a possible audit gap when the producer receives an incomplete final record or its stream read/poll fails. Preserve the counter across restarts, show `GAP` in Source Health and fail continuity checks; do not store or process incomplete data as a full event. If the inbox cannot record the gap, reuse the pending I/O-loss marker.
-- A clean EOF with no partial record does not create a gap. The counter has no acknowledgement workflow yet, and a forced termination or power loss before a gap is recorded can still hide missing data; lost records are not recovered.
+- A clean EOF with no partial record does not create a gap. A forced termination or power loss before a gap is recorded can still hide missing data; lost records are not recovered. A separate review workflow was added on 2026-11-24.
 - Validation: reproduced the previously unreported incomplete record on the Azure Linux VM. After the fix, 65 focused and regression tests passed on that VM, including real pipe EOF, read/poll failures, persistence across reopening and a simulated full inbox. Locally, 405 tests completed with 9 Linux/root-only skips. No model call or defensive action was made.
 
 ### 2026-11-22 — Collection, model transport and response recovery
