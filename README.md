@@ -507,6 +507,12 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-24 — Reject invalid response timing
+
+- Require a valid, current queue timestamp and the same boot before an assessment can authorize containment. A missing, invalid, future or expired timestamp keeps the assessment for manual review and cannot trigger an action. An invalid timestamp no longer crashes queue processing.
+- Recheck the complete response window when resuming a plan and at the privileged executor boundary. A clock rollback to before the plan was created fails closed, just as an expired response does. This cannot detect every clock adjustment: keep the host clock reliable and investigate clock warnings.
+- Validation: 75 focused tests passed on the Azure Linux VM, including missing, malformed and future queue times, expired analysis, restart, rollback and executor authorization. The complete local suite completed 419 tests with nine Linux/root-only skips; the VM regression tests used isolated fixtures and made no model calls or defensive changes to the host.
+
 ### 2026-11-24 — Protect model budget against clock rollback
 
 - Preserve the recorded hourly call count if the system clock moves backwards across an hour boundary. Pause model requests with a visible `CLOCK SKEW` state, keep the original budget reset time, and resume under the same count once the saved hour is reached. The evaluator and prompt-test fixture use the same protection.

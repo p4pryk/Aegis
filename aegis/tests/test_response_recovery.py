@@ -115,6 +115,18 @@ class ResponseRecovery(unittest.TestCase):
         self.e.tick(time.time()+121)
         self.assertEqual(self.status(row), 'defense_error')
 
+    def test_clock_rollback_stops_recovery(self):
+        row = self.interrupted()
+        deadline = self.store.db.execute('SELECT deadline FROM response_runs WHERE case_id=?',(row[0],)).fetchone()[0]
+        self.e.tick(deadline-121)
+        self.assertEqual(self.status(row), 'defense_error')
+
+    def test_response_window_rejects_invalid_times(self):
+        for deadline, now in ((None, 1), (float('nan'), 1), (100, float('nan')), (100, -21), (100, 101)):
+            with self.subTest(deadline=deadline, now=now):self.assertFalse(response.in_response_window(deadline,now))
+        self.assertTrue(response.in_response_window(100,-20))
+        self.assertTrue(response.in_response_window(100,100))
+
     def test_legacy_recognized_case_gets_explicit_error(self):
         row = self.build()
         self.e.status(row[0], 'recognized')

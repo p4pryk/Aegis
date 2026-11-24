@@ -791,10 +791,12 @@ class CorrelatedEngine:
             return
         if not analysis['proposed_actions']:self.status(identifier,'observing');return
         queued=self.db.execute('SELECT queued_at,boot_id FROM analysis_queue WHERE case_id=? AND version=?',(identifier,version)).fetchone()
-        if queued and (time.time()-queued[0]>self.c.get('analysis_timeout_seconds',90) or queued[1]!=self.boot_id):
+        queued_at=queued[0] if queued else None
+        age=time.time()-queued_at if type(queued_at) in (int,float) and math.isfinite(queued_at) else None
+        if age is None or not 0<=age<=self.c.get('analysis_timeout_seconds',90) or queued[1]!=self.boot_id:
             analysis['proposed_actions']=[]
             self.db.execute('UPDATE cases SET analysis_json=? WHERE id=?',(canonical(analysis),identifier))
-            self.status(identifier,'analysis_error',{'error':'Historical assessment recorded; automatic response expired or host rebooted; manual review required'})
+            self.status(identifier,'analysis_error',{'error':'Historical assessment recorded; response timing or host identity is invalid or expired; manual review required'})
             return
         if fresh['allowed_actions']!=data['allowed_actions'] or fresh['required_evidence_ids']!=data['required_evidence_ids']:
             self.status(identifier,'analysis_error',{'error':'root prerequisites changed'});return
@@ -832,6 +834,9 @@ class CorrelatedEngine:
             self.db.execute('INSERT INTO analysis_queue VALUES (?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET version=excluded.version,queued_at=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.queued_at ELSE excluded.queued_at END,boot_id=CASE WHEN analysis_queue.version=excluded.version THEN analysis_queue.boot_id ELSE excluded.boot_id END,reason=excluded.reason WHERE analysis_queue.version!=excluded.version OR analysis_queue.reason!=excluded.reason',(identifier,version,updated,self.boot_id,reason))
             queued=self.db.execute('SELECT queued_at FROM analysis_queue WHERE case_id=?',(identifier,)).fetchone()[0]
             self.db.commit()
+            if type(queued) not in (int,float) or not math.isfinite(queued):
+                self.status(identifier,'analysis_error',{'error':'Invalid analysis queue timestamp; manual review required; no defense performed'})
+                continue
             if now-queued>max(90,min(86400,self.c.get('analysis_queue_max_age_seconds',7200))):
                 self.status(identifier,'analysis_error',{'error':'Deferred analysis expired; manual review required; no defense performed'})
                 continue

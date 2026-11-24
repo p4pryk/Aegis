@@ -1,6 +1,7 @@
 """Durable, bounded response attempts. Only a freshly checked local plan is enrolled."""
 import hashlib
 import json
+import math
 import pathlib
 import re
 import sqlite3
@@ -13,6 +14,11 @@ def encode(value):
 
 def policy_hash(config):
     return hashlib.sha256(encode(config).encode()).hexdigest()
+
+
+def in_response_window(deadline,now):
+    return (type(deadline) in (int,float) and math.isfinite(deadline) and
+            type(now) in (int,float) and math.isfinite(now) and deadline-120<=now<=deadline)
 
 
 def authorize_step(config, envelope, revalidate=True):
@@ -37,7 +43,7 @@ def authorize_step(config, envelope, revalidate=True):
         if not row:raise ValueError('Unknown case step')
         current_boot=pathlib.Path('/proc/sys/kernel/random/boot_id')
         boot=current_boot.read_text().strip() if current_boot.exists() else 'test-boot'
-        if row[0]!=version or row[1]!='recognized' or row[4]!=boot or row[5]!=policy_hash(config) or time.time()>row[6] or row[9]!='running':
+        if row[0]!=version or row[1]!='recognized' or row[4]!=boot or row[5]!=policy_hash(config) or not in_response_window(row[6],time.time()) or row[9]!='running':
             raise ValueError('Case step expired or authorization changed')
         evidence=json.loads(row[3]);action=json.loads(row[7]);request=json.loads(row[8])
         if evidence.get('version')!=version or position>=len(evidence.get('allowed_actions',[])) or evidence['allowed_actions'][position]!=action:
@@ -149,16 +155,16 @@ def advance(engine, identifier, now=None, stop=None):
         archive(engine.db, identifier)
         engine.db.commit()
         return
-    valid = engine.c.get('response_mode','observe') == 'enforce' and run[0] == engine.boot_id and run[1] == policy_hash(engine.c) and now <= run[2]
+    valid = engine.c.get('response_mode','observe') == 'enforce' and run[0] == engine.boot_id and run[1] == policy_hash(engine.c) and in_response_window(run[2],now)
     steps = engine.db.execute('SELECT position,action_json,request_json,status,attempts,next_attempt '
                               'FROM response_steps WHERE case_id=? ORDER BY position', (identifier,)).fetchall()
     for position, raw, request, status, attempts, next_attempt in steps:
         if stop is not None and stop.is_set():break
         if status in ('executed', 'failed'):
             continue
-        if not valid or time.time() > run[2]:
+        if not valid or not in_response_window(run[2],time.time()):
             engine.db.execute("UPDATE response_steps SET status='failed',result_json=? WHERE case_id=? AND position=?",
-                              (encode({'error': 'Recovery expired, boot changed or policy changed; manual review required'}), identifier, position))
+                              (encode({'error': 'Recovery timing invalid or expired, boot changed or policy changed; manual review required'}), identifier, position))
             continue
         if next_attempt > now:
             continue

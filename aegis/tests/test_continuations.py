@@ -84,6 +84,24 @@ class Deferred(unittest.TestCase):
         self.assertTrue(analysis['summary']);self.assertEqual(analysis['proposed_actions'],[])
         self.assertFalse(self.store.db.execute('SELECT * FROM response_runs').fetchall())
 
+    def test_missing_or_future_queue_time_requires_review(self):
+        self.chain();row=self.awaiting();proposal=self.proposal(row)
+        for value in ('future','missing'):
+            with self.subTest(value=value):
+                if value=='future':self.age(row,-120)
+                else:self.store.db.execute('DELETE FROM analysis_queue WHERE case_id=?',(row[0],));self.store.db.commit()
+                self.apply(row,proposal)
+                self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
+                saved=json.loads(self.store.db.execute('SELECT analysis_json FROM cases WHERE id=?',(row[0],)).fetchone()[0])
+                self.assertTrue(saved['summary']);self.assertEqual(saved['proposed_actions'],[])
+                self.store.db.execute("UPDATE cases SET status='awaiting_analysis' WHERE id=?",(row[0],));self.store.db.commit()
+
+    def test_invalid_queue_time_does_not_crash_consumer(self):
+        self.chain();row=self.awaiting()
+        self.store.db.execute('UPDATE analysis_queue SET queued_at=NULL WHERE case_id=?',(row[0],));self.store.db.commit()
+        self.e.tick()
+        self.assertEqual(self.status(row),'analysis_error');self.assertFalse(self.actions)
+
     def test_reboot_preserves_wait_but_disables_automatic_response(self):
         self.chain();row=self.awaiting()
         self.e=agent.CorrelatedEngine(self.c,self.store,self.execute);self.e.boot_id='new-boot'

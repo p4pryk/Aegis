@@ -296,6 +296,9 @@ class Operations(unittest.TestCase):
         self.store.db.execute("UPDATE response_steps SET status='running' WHERE case_id=? AND position=1",(identifier,));self.store.db.commit()
         envelope={'case_id':identifier,'position':1,'version':1}
         self.assertEqual(response.authorize_step(self.c,envelope)['ip'],'198.51.100.23')
+        deadline=self.store.db.execute('SELECT deadline FROM response_runs WHERE case_id=?',(identifier,)).fetchone()[0]
+        with patch.object(response.time,'time',return_value=deadline-121):
+            with self.assertRaises(ValueError):response.authorize_step(self.c,envelope)
         for invalid in ({'action':'block_ip','ip':'198.51.100.23'},dict(envelope,version=2),dict(envelope,position=9)):
             with self.assertRaises(ValueError):response.authorize_step(self.c,invalid)
         rejected=dict(assessment,confidence=.5)
