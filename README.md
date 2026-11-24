@@ -505,6 +505,11 @@ Health is sampled every five seconds; the kernel audit status probe runs every 3
 
 ## Change log
 
+### 2026-11-24 — Update CI action runtimes
+
+- Update the pinned GitHub checkout and Python setup actions to Node 24-based releases. The workflow keeps read-only repository permissions and tests on both Ubuntu runner versions.
+- Validation: checked the action tags and Node runtimes against their upstream repositories and validated the workflow syntax, matrix, permissions and pins on the Azure VM.
+
 ### 2026-11-24 — Review audit stream gaps
 
 - Add a root-only review for an exact audit inbox identity and stream-gap count. Store the review history in the inbox under the same write lock as new gaps; reject stale, duplicated or malformed reviews. A new interruption reopens the warning, and other loss indicators remain unchanged.
